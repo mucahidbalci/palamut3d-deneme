@@ -7,43 +7,36 @@
    ============================================================ */
 
 import React, { useState, useCallback, useEffect, useRef, useMemo } from "react";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import { STLExporter } from "three/examples/jsm/exporters/STLExporter.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
-import JSZip from "jszip";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import JSZip from "jszip";
 
 /* ------------------------------------------------------------
-   ÖLÇEK SABİTLERİ
-   1 sahne birimi = 10 mm. Arayüz her zaman mm gösterir.
+   ÖLÇEK SABİTLERİ — 1 sahne birimi = 10 mm
    ------------------------------------------------------------ */
 const MM_PER_UNIT = 10;
 const UNIT_PER_MM = 1 / MM_PER_UNIT;
 const CUBE_SIZE = 5;
 const CUBE_SEG = 128;
 const TEX_SIZE = 512;
-const MASK_SIZE = 512;
 const MAX_LAYERS = 8;
+const MAX_BOLGE = 8;
 const MAX_STL_MB = 80;
+const MAX_UNDO = 40;
 
 const DEFAULT_COLOR = "#22d3ee";
 const DEFAULT_METALNESS = 0.22;
 const DEFAULT_ROUGHNESS = 0.58;
 
-const QUICK_COLORS = [
-  "#22d3ee",
-  "#f97316",
-  "#ef4444",
-  "#22c55e",
-  "#a855f7",
-  "#ec4899",
-  "#e5e7eb",
-  "#4a5260",
-];
+const QUICK_COLORS = ["#22d3ee", "#f97316", "#ef4444", "#22c55e", "#a855f7", "#ec4899", "#e5e7eb", "#4a5260"];
 
-const CATEGORIES: { id: string; label: string }[] = [
+const BOLGE_RENKLERI = ["#22d3ee", "#fbbf24", "#e879f9", "#a3e635", "#fb923c", "#a78bfa", "#fb7185", "#34d399"];
+
+const CATEGORIES = [
   { id: "tumu", label: "Tümü" },
   { id: "geometrik", label: "Geometrik" },
   { id: "endustriyel", label: "Endüstriyel" },
@@ -55,7 +48,7 @@ const CATEGORIES: { id: string; label: string }[] = [
   { id: "ozel", label: "Özel" },
 ];
 
-const BLEND_MODES: { id: string; label: string }[] = [
+const BLEND_MODES = [
   { id: "ekle", label: "Eklemeli" },
   { id: "ort", label: "Ortalama" },
   { id: "maks", label: "Maksimum" },
@@ -63,10 +56,17 @@ const BLEND_MODES: { id: string; label: string }[] = [
   { id: "fark", label: "Fark" },
 ];
 
+const ARACLAR = [
+  { id: "kalem", label: "Kalem", ikon: "brush" },
+  { id: "lasso", label: "Lasso", ikon: "target" },
+  { id: "silgi", label: "Silgi", ikon: "eraser" },
+  { id: "sec", label: "Seç", ikon: "magnet" },
+];
+
 /* ============================================================
-   DOKU ÜRETİM YARDIMCILARI (tohumlu, Math.random yok)
+   DOKU ÜRETİM YARDIMCILARI — tohumlu, Math.random yok
    ============================================================ */
-function mulberry32(a: number) {
+function mulberry32(a) {
   return function () {
     a |= 0;
     a = (a + 0x6d2b79f5) | 0;
@@ -76,16 +76,12 @@ function mulberry32(a: number) {
   };
 }
 
-function fillBg(ctx: CanvasRenderingContext2D, s: number, c = "#000000") {
+function fillBg(ctx, s, c = "#000000") {
   ctx.fillStyle = c;
   ctx.fillRect(0, 0, s, s);
 }
 
-function paint(
-  ctx: CanvasRenderingContext2D,
-  s: number,
-  fn: (u: number, v: number) => number
-) {
+function paint(ctx, s, fn) {
   const img = ctx.createImageData(s, s);
   const d = img.data;
   for (let y = 0; y < s; y++) {
@@ -104,14 +100,13 @@ function paint(
   ctx.putImageData(img, 0, 0);
 }
 
-function noise2(seed: number, cells: number) {
+function noise2(seed, cells) {
   const rnd = mulberry32(seed);
   const n = Math.max(2, Math.round(cells));
   const lat = new Float32Array(n * n);
   for (let i = 0; i < lat.length; i++) lat[i] = rnd();
-  const at = (x: number, y: number) =>
-    lat[(((y % n) + n) % n) * n + (((x % n) + n) % n)];
-  return (u: number, v: number) => {
+  const at = (x, y) => lat[(((y % n) + n) % n) * n + (((x % n) + n) % n)];
+  return (u, v) => {
     const fx = u * n;
     const fy = v * n;
     const x0 = Math.floor(fx);
@@ -128,17 +123,15 @@ function noise2(seed: number, cells: number) {
   };
 }
 
-function fbm2(seed: number, cells: number, oct = 4) {
-  const katmanlar: ((u: number, v: number) => number)[] = [];
-  for (let o = 0; o < oct; o++) {
-    katmanlar.push(noise2(seed + o * 37, cells * Math.pow(2, o)));
-  }
-  return (u: number, v: number) => {
+function fbm2(seed, cells, oct = 4) {
+  const kat = [];
+  for (let o = 0; o < oct; o++) kat.push(noise2(seed + o * 37, cells * Math.pow(2, o)));
+  return (u, v) => {
     let t = 0;
     let amp = 0.5;
     let tot = 0;
     for (let o = 0; o < oct; o++) {
-      t += katmanlar[o](u, v) * amp;
+      t += kat[o](u, v) * amp;
       tot += amp;
       amp *= 0.5;
     }
@@ -146,7 +139,7 @@ function fbm2(seed: number, cells: number, oct = 4) {
   };
 }
 
-function stripesV(ctx: CanvasRenderingContext2D, s: number, n: number, duty = 0.5, soft = 0) {
+function stripesV(ctx, s, n, duty = 0.5, soft = 0) {
   const w = s / n;
   const a = 0.5 - duty / 2;
   const b = 0.5 + duty / 2;
@@ -170,7 +163,7 @@ function stripesV(ctx: CanvasRenderingContext2D, s: number, n: number, duty = 0.
   }
 }
 
-function stripesH(ctx: CanvasRenderingContext2D, s: number, n: number, duty = 0.5, soft = 0) {
+function stripesH(ctx, s, n, duty = 0.5, soft = 0) {
   const h = s / n;
   const a = 0.5 - duty / 2;
   const b = 0.5 + duty / 2;
@@ -194,14 +187,7 @@ function stripesH(ctx: CanvasRenderingContext2D, s: number, n: number, duty = 0.
   }
 }
 
-function stripesAng(
-  ctx: CanvasRenderingContext2D,
-  s: number,
-  n: number,
-  ang: number,
-  duty = 0.45,
-  soft = 0.1
-) {
+function stripesAng(ctx, s, n, ang, duty = 0.45, soft = 0.1) {
   ctx.save();
   ctx.translate(s / 2, s / 2);
   ctx.rotate(ang);
@@ -224,7 +210,7 @@ function stripesAng(
   ctx.restore();
 }
 
-function dotsGrid(ctx: CanvasRenderingContext2D, s: number, n: number, r: number, soft = true) {
+function dotsGrid(ctx, s, n, r, soft = true) {
   const c = s / n;
   for (let y = 0; y < n; y++) {
     for (let x = 0; x < n; x++) {
@@ -235,9 +221,7 @@ function dotsGrid(ctx: CanvasRenderingContext2D, s: number, n: number, r: number
         g.addColorStop(0, "#ffffff");
         g.addColorStop(1, "#000000");
         ctx.fillStyle = g;
-      } else {
-        ctx.fillStyle = "#ffffff";
-      }
+      } else ctx.fillStyle = "#ffffff";
       ctx.beginPath();
       ctx.arc(cx, cy, r, 0, Math.PI * 2);
       ctx.fill();
@@ -245,7 +229,7 @@ function dotsGrid(ctx: CanvasRenderingContext2D, s: number, n: number, r: number
   }
 }
 
-function gridLines(ctx: CanvasRenderingContext2D, s: number, n: number, t: number) {
+function gridLines(ctx, s, n, t) {
   const c = s / n;
   ctx.fillStyle = "#ffffff";
   for (let i = 0; i < n; i++) {
@@ -254,7 +238,7 @@ function gridLines(ctx: CanvasRenderingContext2D, s: number, n: number, t: numbe
   }
 }
 
-function hexPath(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number) {
+function hexPath(ctx, cx, cy, r) {
   ctx.beginPath();
   for (let i = 0; i < 6; i++) {
     const a = (Math.PI / 3) * i;
@@ -266,7 +250,7 @@ function hexPath(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: numbe
   ctx.closePath();
 }
 
-function radialCells(ctx: CanvasRenderingContext2D, s: number, n: number, ic: string, dis: string) {
+function radialCells(ctx, s, n, ic, dis) {
   const c = s / n;
   for (let y = 0; y < n; y++) {
     for (let x = 0; x < n; x++) {
@@ -284,15 +268,7 @@ function radialCells(ctx: CanvasRenderingContext2D, s: number, n: number, ic: st
   }
 }
 
-function blobs(
-  ctx: CanvasRenderingContext2D,
-  s: number,
-  adet: number,
-  minR: number,
-  maxR: number,
-  seed: number,
-  parlaklik = 0.8
-) {
+function blobs(ctx, s, adet, minR, maxR, seed, parlaklik = 0.8) {
   const rnd = mulberry32(seed);
   for (let i = 0; i < adet; i++) {
     const cx = rnd() * s;
@@ -316,14 +292,7 @@ function blobs(
 /* ============================================================
    PRESET KÜTÜPHANESİ — 126 doku
    ============================================================ */
-type Preset = {
-  id: string;
-  name: string;
-  category: string;
-  draw: (ctx: CanvasRenderingContext2D, s: number) => void;
-};
-
-const PRESETS: Preset[] = [
+const PRESETS = [
   { id: "kare_kume", name: "Kare Küme", category: "geometrik", draw: (ctx, s) => { fillBg(ctx, s); const n = 8; const c = s / n; for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { const g = ctx.createLinearGradient(x * c, y * c, x * c + c, y * c + c); g.addColorStop(0, "#ffffff"); g.addColorStop(1, "#555555"); ctx.fillStyle = g; ctx.fillRect(x * c + 1.5, y * c + 1.5, c - 3, c - 3); } } },
   { id: "izgara", name: "Izgara", category: "geometrik", draw: (ctx, s) => { fillBg(ctx, s); gridLines(ctx, s, 6, 4); } },
   { id: "noktalar", name: "Noktalar", category: "geometrik", draw: (ctx, s) => { fillBg(ctx, s); dotsGrid(ctx, s, 8, (s / 8) * 0.3); } },
@@ -334,7 +303,7 @@ const PRESETS: Preset[] = [
   { id: "ucgen", name: "Üçgen", category: "geometrik", draw: (ctx, s) => { fillBg(ctx, s); const n = 8; const c = s / n; ctx.fillStyle = "#ffffff"; for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { const yukari = (x + y) % 2 === 0; ctx.beginPath(); if (yukari) { ctx.moveTo(x * c, y * c + c); ctx.lineTo(x * c + c / 2, y * c); ctx.lineTo(x * c + c, y * c + c); } else { ctx.moveTo(x * c, y * c); ctx.lineTo(x * c + c, y * c); ctx.lineTo(x * c + c / 2, y * c + c); } ctx.closePath(); ctx.fill(); } } },
   { id: "baklava", name: "Baklava", category: "geometrik", draw: (ctx, s) => { fillBg(ctx, s); const n = 6; const c = s / n; for (let y = -1; y < n + 1; y++) for (let x = -1; x < n + 1; x++) { const cx = x * c + (y % 2 ? c / 2 : 0); const cy = y * c; const g = ctx.createLinearGradient(cx, cy - c, cx, cy + c); g.addColorStop(0, "#ffffff"); g.addColorStop(1, "#444444"); ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(cx, cy - c * 0.55); ctx.lineTo(cx + c * 0.55, cy); ctx.lineTo(cx, cy + c * 0.55); ctx.lineTo(cx - c * 0.55, cy); ctx.closePath(); ctx.fill(); } } },
   { id: "altigen", name: "Altıgen", category: "geometrik", draw: (ctx, s) => { fillBg(ctx, s); const r = s / 4; const h = r * 1.5; for (let row = -1; row < 5; row++) for (let col = -1; col < 4; col++) { const cx = col * r * Math.sqrt(3) + (row % 2 ? (r * Math.sqrt(3)) / 2 : 0); const cy = row * h; hexPath(ctx, cx, cy, r * 0.85); ctx.fillStyle = "#ffffff"; ctx.fill(); } } },
-  { id: "altigen_balpetegi", name: "Bal Petegi", category: "geometrik", draw: (ctx, s) => { fillBg(ctx, s); const r = s / 9; const h = r * 1.5; ctx.strokeStyle = "#ffffff"; ctx.lineWidth = r * 0.22; for (let row = -1; row < 10; row++) for (let col = -1; col < 8; col++) { const cx = col * r * Math.sqrt(3) + (row % 2 ? (r * Math.sqrt(3)) / 2 : 0); const cy = row * h; hexPath(ctx, cx, cy, r * 0.78); ctx.stroke(); } } },
+  { id: "altigen_balpetegi", name: "Bal Petegi", category: "geometrik", draw: (ctx, s) => { fillBg(ctx, s); const r = s / 9; ctx.strokeStyle = "#ffffff"; ctx.lineWidth = r * 0.22; for (let row = -1; row < 10; row++) for (let col = -1; col < 8; col++) { const cx = col * r * Math.sqrt(3) + (row % 2 ? (r * Math.sqrt(3)) / 2 : 0); const cy = row * r * 1.5; hexPath(ctx, cx, cy, r * 0.78); ctx.stroke(); } } },
   { id: "yildiz", name: "Yıldız", category: "geometrik", draw: (ctx, s) => { fillBg(ctx, s); const n = 5; const c = s / n; ctx.fillStyle = "#ffffff"; for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { const cx = x * c + c / 2; const cy = y * c + c / 2; ctx.beginPath(); for (let i = 0; i < 10; i++) { const a = (Math.PI / 5) * i - Math.PI / 2; const r = i % 2 === 0 ? c * 0.42 : c * 0.17; const px = cx + r * Math.cos(a); const py = cy + r * Math.sin(a); if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py); } ctx.closePath(); ctx.fill(); } } },
   { id: "daire_icice", name: "İç İçe Daire", category: "geometrik", draw: (ctx, s) => { fillBg(ctx, s); const n = 4; const c = s / n; ctx.strokeStyle = "#ffffff"; ctx.lineWidth = c * 0.05; for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { const cx = x * c + c / 2; const cy = y * c + c / 2; for (let k = 1; k <= 4; k++) { ctx.beginPath(); ctx.arc(cx, cy, (c / 2) * (k / 4.4), 0, Math.PI * 2); ctx.stroke(); } } } },
   { id: "kare_icice", name: "İç İçe Kare", category: "geometrik", draw: (ctx, s) => { fillBg(ctx, s); const n = 4; const c = s / n; ctx.strokeStyle = "#ffffff"; ctx.lineWidth = c * 0.05; for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { for (let k = 1; k <= 4; k++) { const o = (c / 2) * (k / 4.4); ctx.strokeRect(x * c + c / 2 - o, y * c + c / 2 - o, o * 2, o * 2); } } } },
@@ -379,7 +348,7 @@ const PRESETS: Preset[] = [
   { id: "anodize", name: "Anodize", category: "endustriyel", draw: (ctx, s) => { const g = noise2(83, 160); const g2 = noise2(84, 20); paint(ctx, s, (u, v) => 0.55 + (g(u * 0.05, v) - 0.5) * 0.5 + (g2(u, v) - 0.5) * 0.25); } },
 
   { id: "deri", name: "Deri", category: "dokusel", draw: (ctx, s) => { fillBg(ctx, s, "#141414"); blobs(ctx, s, 90, 10, 30, 41, 0.75); } },
-  { id: "deri_2", name: "Deri 2", category: "dokusel", draw: (ctx, s) => { fillBg(ctx, s, "#101010"); blobs(ctx, s, 200, 4, 12, 47, 0.8); const g = noise2(48, 220); paint(ctx, s, (u, v) => 0.3 + g(u, v) * 0.4); } },
+  { id: "deri_2", name: "Deri 2", category: "dokusel", draw: (ctx, s) => { fillBg(ctx, s, "#101010"); blobs(ctx, s, 200, 4, 12, 47, 0.8); const g = noise2(48, 220); ctx.globalAlpha = 0.55; paint(ctx, s, (u, v) => 0.3 + g(u, v) * 0.4); ctx.globalAlpha = 1; } },
   { id: "deri_kalin", name: "Kalın Deri", category: "dokusel", draw: (ctx, s) => { fillBg(ctx, s, "#181818"); blobs(ctx, s, 40, 26, 60, 53, 0.7); } },
   { id: "zampara", name: "Zımpara", category: "dokusel", draw: (ctx, s) => { const g = noise2(59, 260); paint(ctx, s, (u, v) => 0.3 + g(u, v) * 0.55); } },
 
@@ -400,8 +369,8 @@ const PRESETS: Preset[] = [
   { id: "pelus", name: "Pelüs", category: "kumas", draw: (ctx, s) => { const g = fbm2(89, 40, 3); paint(ctx, s, (u, v) => 0.45 + g(u, v) * 0.5); const rnd = mulberry32(90); ctx.globalAlpha = 0.35; ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1; for (let i = 0; i < 500; i++) { const x = rnd() * s; const y = rnd() * s; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + (rnd() - 0.5) * 8, y - rnd() * 10); ctx.stroke(); } ctx.globalAlpha = 1; } },
   { id: "kece", name: "Keçe", category: "kumas", draw: (ctx, s) => { const g = noise2(97, 90); paint(ctx, s, (u, v) => 0.5 + (g(u, v) - 0.5) * 0.8); const rnd = mulberry32(98); ctx.globalAlpha = 0.3; ctx.strokeStyle = "#ffffff"; for (let i = 0; i < 400; i++) { const x = rnd() * s; const y = rnd() * s; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + (rnd() - 0.5) * 20, y + (rnd() - 0.5) * 20); ctx.stroke(); } ctx.globalAlpha = 1; } },
 
-  { id: "voronoi", name: "Voronoi", category: "organik", draw: (ctx, s) => { const rnd = mulberry32(23); const pts: [number, number][] = []; for (let i = 0; i < 18; i++) pts.push([rnd() * s, rnd() * s]); const img = ctx.createImageData(s, s); for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) { let d1 = 1e9, d2 = 1e9; for (const p of pts) { let dx = Math.abs(x - p[0]); if (dx > s / 2) dx = s - dx; let dy = Math.abs(y - p[1]); if (dy > s / 2) dy = s - dy; const d = Math.sqrt(dx * dx + dy * dy); if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) d2 = d; } const v = Math.floor(Math.min(1, (d2 - d1) / 14) * 255); const i = (y * s + x) * 4; img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 255; } ctx.putImageData(img, 0, 0); } },
-  { id: "voronoi_kalin", name: "Kalın Voronoi", category: "organik", draw: (ctx, s) => { const rnd = mulberry32(29); const pts: [number, number][] = []; for (let i = 0; i < 9; i++) pts.push([rnd() * s, rnd() * s]); const img = ctx.createImageData(s, s); for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) { let d1 = 1e9, d2 = 1e9; for (const p of pts) { let dx = Math.abs(x - p[0]); if (dx > s / 2) dx = s - dx; let dy = Math.abs(y - p[1]); if (dy > s / 2) dy = s - dy; const d = Math.sqrt(dx * dx + dy * dy); if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) d2 = d; } const v = Math.floor(Math.min(1, (d2 - d1) / 34) * 255); const i = (y * s + x) * 4; img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 255; } ctx.putImageData(img, 0, 0); } },
+  { id: "voronoi", name: "Voronoi", category: "organik", draw: (ctx, s) => { const rnd = mulberry32(23); const pts = []; for (let i = 0; i < 18; i++) pts.push([rnd() * s, rnd() * s]); const img = ctx.createImageData(s, s); for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) { let d1 = 1e9, d2 = 1e9; for (const p of pts) { let dx = Math.abs(x - p[0]); if (dx > s / 2) dx = s - dx; let dy = Math.abs(y - p[1]); if (dy > s / 2) dy = s - dy; const d = Math.sqrt(dx * dx + dy * dy); if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) d2 = d; } const v = Math.floor(Math.min(1, (d2 - d1) / 14) * 255); const i = (y * s + x) * 4; img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 255; } ctx.putImageData(img, 0, 0); } },
+  { id: "voronoi_kalin", name: "Kalın Voronoi", category: "organik", draw: (ctx, s) => { const rnd = mulberry32(29); const pts = []; for (let i = 0; i < 9; i++) pts.push([rnd() * s, rnd() * s]); const img = ctx.createImageData(s, s); for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) { let d1 = 1e9, d2 = 1e9; for (const p of pts) { let dx = Math.abs(x - p[0]); if (dx > s / 2) dx = s - dx; let dy = Math.abs(y - p[1]); if (dy > s / 2) dy = s - dy; const d = Math.sqrt(dx * dx + dy * dy); if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) d2 = d; } const v = Math.floor(Math.min(1, (d2 - d1) / 34) * 255); const i = (y * s + x) * 4; img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 255; } ctx.putImageData(img, 0, 0); } },
   { id: "labirent", name: "Labirent", category: "organik", draw: (ctx, s) => { const rnd = mulberry32(31); const n = 12; const c = s / n; fillBg(ctx, s); ctx.strokeStyle = "#ffffff"; ctx.lineWidth = c * 0.16; for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { ctx.beginPath(); if (rnd() > 0.5) { ctx.moveTo(x * c, y * c); ctx.lineTo(x * c, y * c + c); } else { ctx.moveTo(x * c, y * c); ctx.lineTo(x * c + c, y * c); } ctx.stroke(); } } },
   { id: "mercan", name: "Mercan", category: "organik", draw: (ctx, s) => { fillBg(ctx, s, "#0d0d0d"); const rnd = mulberry32(37); ctx.strokeStyle = "#ffffff"; ctx.lineCap = "round"; for (let i = 0; i < 160; i++) { let x = rnd() * s, y = rnd() * s, a = rnd() * Math.PI * 2; ctx.lineWidth = 1 + rnd() * 3; ctx.beginPath(); ctx.moveTo(x, y); for (let k = 0; k < 6; k++) { a += (rnd() - 0.5) * 1.4; x += Math.cos(a) * 9; y += Math.sin(a) * 9; ctx.lineTo(x, y); } ctx.stroke(); } } },
   { id: "sponge", name: "Sünger", category: "organik", draw: (ctx, s) => { fillBg(ctx, s, "#ffffff"); blobs(ctx, s, 120, 6, 22, 43, 0.55); const g = noise2(44, 60); ctx.globalAlpha = 0.4; paint(ctx, s, (u, v) => g(u, v)); ctx.globalAlpha = 1; } },
@@ -425,8 +394,8 @@ const PRESETS: Preset[] = [
 
   { id: "damask", name: "Damasık", category: "dekoratif", draw: (ctx, s) => { fillBg(ctx, s, "#101010"); const n = 3; const c = s / n; ctx.strokeStyle = "#ffffff"; ctx.lineWidth = c * 0.04; for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { const cx = x * c + c / 2; const cy = y * c + c / 2; ctx.beginPath(); ctx.moveTo(cx, cy - c * 0.42); ctx.bezierCurveTo(cx + c * 0.4, cy - c * 0.1, cx + c * 0.1, cy + c * 0.4, cx, cy + c * 0.42); ctx.bezierCurveTo(cx - c * 0.1, cy + c * 0.4, cx - c * 0.4, cy - c * 0.1, cx, cy - c * 0.42); ctx.stroke(); ctx.beginPath(); ctx.arc(cx, cy, c * 0.09, 0, Math.PI * 2); ctx.stroke(); } } },
   { id: "mandala", name: "Mandala", category: "dekoratif", draw: (ctx, s) => { fillBg(ctx, s); const cx = s / 2; const cy = s / 2; ctx.strokeStyle = "#ffffff"; for (let h = 0; h < 4; h++) { const r = (s / 2) * ((h + 1) / 4.4); ctx.lineWidth = 2 + h; ctx.beginPath(); for (let i = 0; i <= 96; i++) { const a = (Math.PI * 2 * i) / 96; const rr = r * (0.86 + 0.14 * Math.sin(a * 12 + h)); const x = cx + rr * Math.cos(a); const y = cy + rr * Math.sin(a); if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); } ctx.closePath(); ctx.stroke(); } } },
-  { id: "kristal", name: "Kristal", category: "dekoratif", draw: (ctx, s) => { fillBg(ctx, s); const rnd = mulberry32(11); const n = 10; const c = s / n; for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { const g = Math.floor(rnd() * 170 + 60); ctx.fillStyle = `rgb(${g},${g},${g})`; ctx.beginPath(); ctx.moveTo(x * c, y * c); ctx.lineTo(x * c + c, y * c + c / 2); ctx.lineTo(x * c, y * c + c); ctx.closePath(); ctx.fill(); } } },
-  { id: "kristal_kalin", name: "Kalın Kristal", category: "dekoratif", draw: (ctx, s) => { fillBg(ctx, s); const rnd = mulberry32(13); const n = 5; const c = s / n; for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { const g = Math.floor(rnd() * 150 + 70); ctx.fillStyle = `rgb(${g},${g},${g})`; ctx.beginPath(); ctx.moveTo(x * c, y * c + c); ctx.lineTo(x * c + c / 2, y * c); ctx.lineTo(x * c + c, y * c + c); ctx.closePath(); ctx.fill(); } } },
+  { id: "kristal", name: "Kristal", category: "dekoratif", draw: (ctx, s) => { fillBg(ctx, s, "#3a3a3a"); const rnd = mulberry32(11); const n = 10; const c = s / n; for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { const g = Math.floor(rnd() * 150 + 90); ctx.fillStyle = `rgb(${g},${g},${g})`; ctx.beginPath(); ctx.moveTo(x * c, y * c); ctx.lineTo(x * c + c, y * c + c / 2); ctx.lineTo(x * c, y * c + c); ctx.closePath(); ctx.fill(); const g2 = Math.floor(rnd() * 150 + 90); ctx.fillStyle = `rgb(${g2},${g2},${g2})`; ctx.beginPath(); ctx.moveTo(x * c + c, y * c); ctx.lineTo(x * c + c, y * c + c); ctx.lineTo(x * c, y * c + c); ctx.closePath(); ctx.fill(); } } },
+  { id: "kristal_kalin", name: "Kalın Kristal", category: "dekoratif", draw: (ctx, s) => { fillBg(ctx, s, "#404040"); const rnd = mulberry32(13); const n = 5; const c = s / n; for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { const g = Math.floor(rnd() * 140 + 100); ctx.fillStyle = `rgb(${g},${g},${g})`; ctx.beginPath(); ctx.moveTo(x * c, y * c + c); ctx.lineTo(x * c + c / 2, y * c); ctx.lineTo(x * c + c, y * c + c); ctx.closePath(); ctx.fill(); } } },
   { id: "tugla", name: "Tuğla", category: "dekoratif", draw: (ctx, s) => { fillBg(ctx, s); const satir = 8; const h = s / satir; const w = s / 4; for (let r = 0; r < satir; r++) { const kay = (r % 2) * (w / 2); for (let c = -1; c < 5; c++) { const x = c * w + kay; const y = r * h; const g = ctx.createLinearGradient(x, y, x, y + h); g.addColorStop(0, "#ffffff"); g.addColorStop(1, "#777777"); ctx.fillStyle = g; ctx.fillRect(x + 2, y + 2, w - 4, h - 4); } } } },
   { id: "tugla_balik", name: "Balık Kılçığı Tuğla", category: "dekoratif", draw: (ctx, s) => { fillBg(ctx, s); const n = 6; const c = s / n; for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { const g = ctx.createLinearGradient(x * c, y * c, x * c + c, y * c + c); g.addColorStop(0, "#ffffff"); g.addColorStop(1, "#5a5a5a"); ctx.fillStyle = g; ctx.save(); ctx.translate(x * c + c / 2, y * c + c / 2); ctx.rotate(((x + y) % 2 ? 1 : -1) * Math.PI / 4); ctx.fillRect(-c * 0.36, -c * 0.13, c * 0.72, c * 0.26); ctx.restore(); } } },
   { id: "sepet", name: "Sepet", category: "dekoratif", draw: (ctx, s) => { fillBg(ctx, s); const n = 8; const c = s / n; for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) { const g = (x + y) % 2 === 0 ? ctx.createLinearGradient(0, y * c, 0, (y + 1) * c) : ctx.createLinearGradient(x * c, 0, (x + 1) * c, 0); g.addColorStop(0, "#000000"); g.addColorStop(0.5, "#ffffff"); g.addColorStop(1, "#000000"); ctx.fillStyle = g; ctx.fillRect(x * c, y * c, c, c); } } },
@@ -458,31 +427,26 @@ const PRESETS: Preset[] = [
   { id: "tik", name: "Tik", category: "ahsap", draw: (ctx, s) => { const g = noise2(179, 24); paint(ctx, s, (u, v) => Math.pow(Math.abs(Math.sin((v * 16 + g(u, v) * 1.5) * Math.PI)), 1.2) * 0.75 + 0.15); } },
 ];
 
-const PRESET_MAP: Record<string, Preset> = PRESETS.reduce((acc, p) => {
+const PRESET_MAP = PRESETS.reduce((acc, p) => {
   acc[p.id] = p;
   return acc;
-}, {} as Record<string, Preset>);
+}, {});
 
-/* Özel yüklenen haritalar */
-const CUSTOM_MAPS = new Map<string, HTMLCanvasElement>();
-/* Thumbnail önbelleği */
-const THUMB_CACHE = new Map<string, string>();
-/* Doku piksel verisi önbelleği (ImageData) */
-const TEX_CACHE = new Map<string, ImageData>();
+const CUSTOM_MAPS = new Map();
+const THUMB_CACHE = new Map();
+const TEX_CACHE = new Map();
 
-function makeTextureCanvas(presetId: string): HTMLCanvasElement {
+function makeTextureCanvas(presetId) {
   const canvas = document.createElement("canvas");
   canvas.width = TEX_SIZE;
   canvas.height = TEX_SIZE;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
   fillBg(ctx, TEX_SIZE);
-
   const ozel = CUSTOM_MAPS.get(presetId);
   if (ozel) {
     ctx.drawImage(ozel, 0, 0, TEX_SIZE, TEX_SIZE);
     return canvas;
   }
-
   const preset = PRESET_MAP[presetId];
   if (preset) {
     try {
@@ -494,31 +458,25 @@ function makeTextureCanvas(presetId: string): HTMLCanvasElement {
   return canvas;
 }
 
-function makeThumbCanvas(presetId: string): HTMLCanvasElement {
+function makeThumbCanvas(presetId) {
   const tam = makeTextureCanvas(presetId);
   const kucuk = document.createElement("canvas");
   kucuk.width = 96;
   kucuk.height = 96;
-  kucuk.getContext("2d")!.drawImage(tam, 0, 0, 96, 96);
+  kucuk.getContext("2d").drawImage(tam, 0, 0, 96, 96);
   return kucuk;
 }
 
-/* Doku ImageData'sı (önbellekli) */
-function getTexData(presetId: string): ImageData {
-  const varOlan = TEX_CACHE.get(presetId);
-  if (varOlan) return varOlan;
+function getTexData(presetId) {
+  const v = TEX_CACHE.get(presetId);
+  if (v) return v;
   const canvas = makeTextureCanvas(presetId);
-  const data = canvas
-    .getContext("2d", { willReadFrequently: true })!
-    .getImageData(0, 0, TEX_SIZE, TEX_SIZE);
+  const data = canvas.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, TEX_SIZE, TEX_SIZE);
   TEX_CACHE.set(presetId, data);
   return data;
 }
 
-/* Yüklenen görseli okunabilir bir kaynağa çevir */
-async function gorselOku(
-  file: File
-): Promise<{ w: number; h: number; kaynak: CanvasImageSource }> {
+async function gorselOku(file) {
   if (typeof createImageBitmap === "function") {
     try {
       const b = await createImageBitmap(file);
@@ -529,7 +487,7 @@ async function gorselOku(
   }
   const url = URL.createObjectURL(file);
   try {
-    const img = await new Promise<HTMLImageElement>((res, rej) => {
+    const img = await new Promise((res, rej) => {
       const i = new Image();
       i.onload = () => res(i);
       i.onerror = () => rej(new Error("gorsel_okunamadi"));
@@ -541,32 +499,36 @@ async function gorselOku(
   }
 }
 
-/* ============================================================
-   MOTOR
-   ============================================================ */
+function dataUrlYukle(url) {
+  return new Promise((res, rej) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = () => rej(new Error("dataurl_okunamadi"));
+    i.src = url;
+  });
+}
 
-/* UV üretimi — en büyük boyut referans alınır, oran korunur */
-function ensureUV(geo: THREE.BufferGeometry): THREE.BufferGeometry {
+/* ============================================================
+   GEOMETRİ MOTORU
+   ============================================================ */
+function ensureUV(geo) {
   if (geo.attributes.uv) return geo;
   geo.computeBoundingBox();
-  const bb = geo.boundingBox!;
+  const bb = geo.boundingBox;
   const boyut = new THREE.Vector3();
   bb.getSize(boyut);
-  const referans = Math.max(boyut.x, boyut.y, boyut.z, 1e-6);
+  const ref = Math.max(boyut.x, boyut.y, boyut.z, 1e-6);
   const pos = geo.attributes.position;
   const uv = new Float32Array(pos.count * 2);
   for (let i = 0; i < pos.count; i++) {
-    uv[i * 2] = (pos.getX(i) - bb.min.x) / referans;
-    uv[i * 2 + 1] = (pos.getY(i) - bb.min.y) / referans;
+    uv[i * 2] = (pos.getX(i) - bb.min.x) / ref;
+    uv[i * 2 + 1] = (pos.getY(i) - bb.min.y) / ref;
   }
   geo.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
   return geo;
 }
 
-/* Kaynaklama: sert normaller ve UV birleşmeyi engeller.
-   Bu yüzden ikisi de ÖNCE silinir, sonra mergeVertices, en son yumuşak normaller üretilir.
-   Sıra bozulursa kaynaklama hiç çalışmaz ve yırtık devam eder. */
-function kaynakla(geo: THREE.BufferGeometry): THREE.BufferGeometry {
+function kaynakla(geo) {
   geo.deleteAttribute("normal");
   geo.deleteAttribute("uv");
   const welded = mergeVertices(geo, 1e-4);
@@ -574,358 +536,440 @@ function kaynakla(geo: THREE.BufferGeometry): THREE.BufferGeometry {
   return welded;
 }
 
-/* Varsayılan küp: kaynaklı ve UV'li.
-   BoxGeometry her yüzü ayrı vertex'lerle kurar; kaynaklamazsak küpün kenarları ayrışır. */
-function kupGeometrisi(): THREE.BufferGeometry {
-  const geo = kaynakla(
-    new THREE.BoxGeometry(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE, CUBE_SEG, CUBE_SEG, CUBE_SEG)
-  );
+function kupGeometrisi() {
+  const geo = kaynakla(new THREE.BoxGeometry(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE, CUBE_SEG, CUBE_SEG, CUBE_SEG));
   ensureUV(geo);
+  geo.computeBoundingBox();
   return geo;
 }
 
-/* STL normalizasyonu */
-function normalizeGeometry(geo: THREE.BufferGeometry): THREE.BufferGeometry {
+function normalizeGeometry(geo) {
   geo.center();
   geo.computeBoundingBox();
   const boyut = new THREE.Vector3();
-  geo.boundingBox!.getSize(boyut);
+  geo.boundingBox.getSize(boyut);
   const maxB = Math.max(boyut.x, boyut.y, boyut.z) || 1;
-  const k = CUBE_SIZE / maxB;
-  geo.scale(k, k, k);
-  geo.computeBoundingBox();
-
-  /* Kaynakla, sonra UV ata: UV kaynaklamadan önce atanırsa birleşme engellenir. */
+  geo.scale(CUBE_SIZE / maxB, CUBE_SIZE / maxB, CUBE_SIZE / maxB);
   const welded = kaynakla(geo);
   geo.dispose();
   ensureUV(welded);
-
-  /* Kaynaklama sonrası bounding box ve normaller temiz durumda. */
   welded.computeBoundingBox();
   return welded;
 }
 
-/* Geçiş eğrileri */
-function uygulaEasing(t: number, mod: string): number {
+function ortalamaKenar(geo) {
+  const idx = geo.index;
+  const pos = geo.attributes.position;
+  if (!idx) return 0;
+  const n = Math.min(3000, Math.floor(idx.count / 3));
+  let top = 0;
+  let adet = 0;
+  for (let t = 0; t < n; t++) {
+    const a = idx.getX(t * 3);
+    const b = idx.getX(t * 3 + 1);
+    const c = idx.getX(t * 3 + 2);
+    const ax = pos.getX(a), ay = pos.getY(a), az = pos.getZ(a);
+    const bx = pos.getX(b), by = pos.getY(b), bz = pos.getZ(b);
+    const cx = pos.getX(c), cy = pos.getY(c), cz = pos.getZ(c);
+    top += Math.hypot(bx - ax, by - ay, bz - az);
+    top += Math.hypot(cx - bx, cy - by, cz - bz);
+    top += Math.hypot(ax - cx, ay - cy, az - cz);
+    adet += 3;
+  }
+  return adet ? top / adet : 0;
+}
+
+/* Yüz komşuluk grafı — kalem ve lasso bunun üzerinde yürür */
+function komsulukKur(geo) {
+  const idx = geo.index;
+  const pos = geo.attributes.position;
+  const ucgenSay = Math.floor(idx.count / 3);
+  const merkez = new Float32Array(ucgenSay * 3);
+  const normal = new Float32Array(ucgenSay * 3);
+  const kenar = new Map();
+  const komsu = new Array(ucgenSay);
+  const vertUcgen = new Array(pos.count);
+  for (let i = 0; i < ucgenSay; i++) komsu[i] = [];
+  for (let i = 0; i < pos.count; i++) vertUcgen[i] = [];
+
+  const va = new THREE.Vector3(), vb = new THREE.Vector3(), vc = new THREE.Vector3();
+  const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), nn = new THREE.Vector3();
+
+  for (let t = 0; t < ucgenSay; t++) {
+    const a = idx.getX(t * 3);
+    const b = idx.getX(t * 3 + 1);
+    const c = idx.getX(t * 3 + 2);
+    const ax = pos.getX(a), ay = pos.getY(a), az = pos.getZ(a);
+    const bx = pos.getX(b), by = pos.getY(b), bz = pos.getZ(b);
+    const cx = pos.getX(c), cy = pos.getY(c), cz = pos.getZ(c);
+    merkez[t * 3] = (ax + bx + cx) / 3;
+    merkez[t * 3 + 1] = (ay + by + cy) / 3;
+    merkez[t * 3 + 2] = (az + bz + cz) / 3;
+    va.set(ax, ay, az); vb.set(bx, by, bz); vc.set(cx, cy, cz);
+    e1.subVectors(vb, va); e2.subVectors(vc, va);
+    nn.crossVectors(e1, e2);
+    if (nn.lengthSq() > 0) nn.normalize();
+    normal[t * 3] = nn.x; normal[t * 3 + 1] = nn.y; normal[t * 3 + 2] = nn.z;
+    vertUcgen[a].push(t); vertUcgen[b].push(t); vertUcgen[c].push(t);
+    const cift = [[a, b], [b, c], [c, a]];
+    for (const [p, q] of cift) {
+      const k = p < q ? p * 1e7 + q : q * 1e7 + p;
+      const l = kenar.get(k);
+      if (l) l.push(t);
+      else kenar.set(k, [t]);
+    }
+  }
+  kenar.forEach((l) => {
+    if (l.length === 2) {
+      komsu[l[0]].push(l[1]);
+      komsu[l[1]].push(l[0]);
+    }
+  });
+  return { merkez, normal, komsu, vertUcgen, ucgenSay };
+}
+
+function smoothstep(a, b, x) {
+  const t = Math.max(0, Math.min(1, (x - a) / (b - a || 1e-6)));
+  return t * t * (3 - 2 * t);
+}
+
+/* Kalem: yüzey boyunca BFS yayılım, feather'lı ağırlık */
+function kalemUygula(graf, baslangic, yaricap, feather, hedef, sil) {
+  const { merkez, komsu, vertUcgen, ucgenSay } = graf;
+  const mesafe = new Float32Array(ucgenSay).fill(Infinity);
+  const kuyruk = [baslangic];
+  mesafe[baslangic] = 0;
+  let head = 0;
+  const dokunulan = [];
+  while (head < kuyruk.length) {
+    const t = kuyruk[head++];
+    const d = mesafe[t];
+    if (d > yaricap) continue;
+    dokunulan.push(t);
+    const tx = merkez[t * 3], ty = merkez[t * 3 + 1], tz = merkez[t * 3 + 2];
+    for (const k of komsu[t]) {
+      const nd = d + Math.hypot(merkez[k * 3] - tx, merkez[k * 3 + 1] - ty, merkez[k * 3 + 2] - tz);
+      if (nd < mesafe[k] && nd <= yaricap) {
+        mesafe[k] = nd;
+        kuyruk.push(k);
+      }
+    }
+  }
+  const f = Math.max(1e-4, feather);
+  for (const t of dokunulan) {
+    const w = 1 - smoothstep(Math.max(0, yaricap - f), yaricap, mesafe[t]);
+    if (w <= 0) continue;
+    const idxBase = t * 3;
+    const a = graf.ucgenSay ? null : null;
+    const uc = [t];
+    for (const tt of uc) {
+      const verts = graf.vertUcgen;
+      void verts;
+    }
+    void idxBase; void a;
+  }
+  return { dokunulan, mesafe, yaricap, f, sil, hedef };
+}
+
+/* Ağırlıkları vertex'e taşı (max birleşim) */
+function agirlikYaz(graf, hedef, dokunulan, mesafe, yaricap, f, sil, vertIdx) {
+  const out = new Float32Array(hedef);
+  const w = new Float32Array(graf.ucgenSay);
+  for (const t of dokunulan) {
+    w[t] = 1 - smoothstep(Math.max(0, yaricap - f), yaricap, mesafe[t]);
+  }
+  for (let i = 0; i < out.length; i++) {
+    let m = 0;
+    const list = graf.vertUcgen[i];
+    for (let j = 0; j < list.length; j++) if (w[list[j]] > m) m = w[list[j]];
+    out[i] = sil ? Math.max(0, hedef[i] - m) : Math.max(hedef[i], m);
+  }
+  void vertIdx;
+  return out;
+}
+
+/* Lasso: ekran uzayında poligon, arkadaki yüzeyler seçilmez */
+function lassoUygula(graf, geo, camera, width, height, polygon, feather) {
+  const { merkez, normal, komsu, ucgenSay } = graf;
+  const secili = new Uint8Array(ucgenSay);
+  const v = new THREE.Vector3();
+  const camDir = new THREE.Vector3();
+  camera.getWorldDirection(camDir);
+  const inside = (x, y) => {
+    let c = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const xi = polygon[i][0], yi = polygon[i][1];
+      const xj = polygon[j][0], yj = polygon[j][1];
+      if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi || 1e-9) + xi) c = !c;
+    }
+    return c;
+  };
+  const bb = geo.boundingBox;
+  const merkezNokta = bb ? bb.getCenter(new THREE.Vector3()) : new THREE.Vector3();
+  for (let t = 0; t < ucgenSay; t++) {
+    const mx = merkez[t * 3], my = merkez[t * 3 + 1], mz = merkez[t * 3 + 2];
+    const nx = normal[t * 3], ny = normal[t * 3 + 1], nz = normal[t * 3 + 2];
+    if (nx * camDir.x + ny * camDir.y + nz * camDir.z > -0.05) continue;
+    v.set(mx, my, mz).project(camera);
+    const px = ((v.x + 1) / 2) * width;
+    const py = ((1 - v.y) / 2) * height;
+    if (inside(px, py)) secili[t] = 1;
+  }
+  void merkezNokta;
+  const dist = new Float32Array(ucgenSay).fill(Infinity);
+  const kuyruk = [];
+  for (let t = 0; t < ucgenSay; t++) {
+    if (!secili[t]) continue;
+    let sinir = false;
+    for (const k of komsu[t]) if (!secili[k]) { sinir = true; break; }
+    if (sinir) { dist[t] = 0; kuyruk.push(t); }
+  }
+  let head = 0;
+  while (head < kuyruk.length) {
+    const t = kuyruk[head++];
+    const tx = merkez[t * 3], ty = merkez[t * 3 + 1], tz = merkez[t * 3 + 2];
+    for (const k of komsu[t]) {
+      if (!secili[k]) continue;
+      const nd = dist[t] + Math.hypot(merkez[k * 3] - tx, merkez[k * 3 + 1] - ty, merkez[k * 3 + 2] - tz);
+      if (nd < dist[k]) { dist[k] = nd; kuyruk.push(k); }
+    }
+  }
+  const f = Math.max(1e-4, feather);
+  const w = new Float32Array(ucgenSay);
+  for (let t = 0; t < ucgenSay; t++) {
+    if (!secili[t]) continue;
+    w[t] = dist[t] === Infinity ? 1 : smoothstep(0, f, dist[t]);
+    if (w[t] < 0.02) w[t] = 0.02;
+  }
+  const out = new Float32Array(geo.attributes.position.count);
+  for (let i = 0; i < out.length; i++) {
+    let m = 0;
+    const list = graf.vertUcgen[i];
+    for (let j = 0; j < list.length; j++) if (w[list[j]] > m) m = w[list[j]];
+    out[i] = m;
+  }
+  return out;
+}
+
+function uygulaEasing(t, mod) {
   if (mod === "s") return t * t * (3 - 2 * t);
   if (mod === "yumusak") return Math.sin((t * Math.PI) / 2);
   return t;
 }
 
-/* Komşu ortalaması ile pozisyon yumuşatma (tek geçiş) */
-function pozisyonYumusat(geo: THREE.BufferGeometry, agirlik: number) {
+function pozisyonYumusat(geo, agirlik) {
   const idx = geo.index;
   const pos = geo.attributes.position;
   if (!idx || agirlik <= 0) return;
   const n = pos.count;
-  const toplamX = new Float32Array(n);
-  const toplamY = new Float32Array(n);
-  const toplamZ = new Float32Array(n);
-  const sayac = new Uint8Array(n);
-  const ekle = (hedef: number, kaynak: number) => {
-    toplamX[hedef] += pos.getX(kaynak);
-    toplamY[hedef] += pos.getY(kaynak);
-    toplamZ[hedef] += pos.getZ(kaynak);
-    if (sayac[hedef] < 255) sayac[hedef] += 1;
+  const tx = new Float32Array(n), ty = new Float32Array(n), tz = new Float32Array(n);
+  const say = new Uint16Array(n);
+  const ekle = (h, k) => {
+    tx[h] += pos.getX(k); ty[h] += pos.getY(k); tz[h] += pos.getZ(k);
+    if (say[h] < 65535) say[h] += 1;
   };
   for (let t = 0; t < idx.count; t += 3) {
-    const a = idx.getX(t);
-    const b = idx.getX(t + 1);
-    const c = idx.getX(t + 2);
-    ekle(a, b);
-    ekle(a, c);
-    ekle(b, a);
-    ekle(b, c);
-    ekle(c, a);
-    ekle(c, b);
+    const a = idx.getX(t), b = idx.getX(t + 1), c = idx.getX(t + 2);
+    ekle(a, b); ekle(a, c); ekle(b, a); ekle(b, c); ekle(c, a); ekle(c, b);
   }
   for (let i = 0; i < n; i++) {
-    const s = sayac[i];
-    if (s === 0) continue;
-    const ox = pos.getX(i);
-    const oy = pos.getY(i);
-    const oz = pos.getZ(i);
-    const hx = toplamX[i] / s;
-    const hy = toplamY[i] / s;
-    const hz = toplamZ[i] / s;
-    pos.setXYZ(
-      i,
-      ox + (hx - ox) * agirlik,
-      oy + (hy - oy) * agirlik,
-      oz + (hz - oz) * agirlik
-    );
+    const s = say[i];
+    if (!s) continue;
+    const ox = pos.getX(i), oy = pos.getY(i), oz = pos.getZ(i);
+    pos.setXYZ(i, ox + (tx[i] / s - ox) * agirlik, oy + (ty[i] / s - oy) * agirlik, oz + (tz[i] / s - oz) * agirlik);
   }
   pos.needsUpdate = true;
 }
 
-/* Kutu bulanıklaştırma (doku / maske yumuşatma) */
-function blurImageData(data: Uint8ClampedArray, s: number, yaricap: number) {
+function blurImageData(data, s, yaricap) {
   if (yaricap < 1) return;
-  const gecici = new Uint8ClampedArray(data.length);
+  const gec = new Uint8ClampedArray(data.length);
   for (let y = 0; y < s; y++) {
-    let toplam = 0;
-    let adet = 0;
+    let top = 0, ad = 0;
     for (let x = -yaricap; x < s + yaricap; x++) {
-      if (x + yaricap < s + yaricap) {
-        const xi = Math.min(s - 1, Math.max(0, x + yaricap));
-        toplam += data[(y * s + xi) * 4];
-        adet++;
-      }
-      if (x - yaricap - 1 >= 0) {
-        const xo = Math.max(0, x - yaricap - 1);
-        toplam -= data[(y * s + xo) * 4];
-        adet--;
-      }
+      if (x + yaricap < s + yaricap) { top += data[(y * s + Math.min(s - 1, Math.max(0, x + yaricap))) * 4]; ad++; }
+      if (x - yaricap - 1 >= 0) { top -= data[(y * s + Math.max(0, x - yaricap - 1)) * 4]; ad--; }
       if (x >= 0 && x < s) {
-        const v = toplam / Math.max(1, adet);
-        gecici[(y * s + x) * 4] = v;
-        gecici[(y * s + x) * 4 + 1] = v;
-        gecici[(y * s + x) * 4 + 2] = v;
-        gecici[(y * s + x) * 4 + 3] = 255;
+        const v = top / Math.max(1, ad);
+        const i = (y * s + x) * 4;
+        gec[i] = v; gec[i + 1] = v; gec[i + 2] = v; gec[i + 3] = 255;
       }
     }
   }
   for (let x = 0; x < s; x++) {
-    let toplam = 0;
-    let adet = 0;
+    let top = 0, ad = 0;
     for (let y = -yaricap; y < s + yaricap; y++) {
-      if (y + yaricap < s + yaricap) {
-        const yi = Math.min(s - 1, Math.max(0, y + yaricap));
-        toplam += gecici[(yi * s + x) * 4];
-        adet++;
-      }
-      if (y - yaricap - 1 >= 0) {
-        const yo = Math.max(0, y - yaricap - 1);
-        toplam -= gecici[(yo * s + x) * 4];
-        adet--;
-      }
+      if (y + yaricap < s + yaricap) { top += gec[(Math.min(s - 1, Math.max(0, y + yaricap)) * s + x) * 4]; ad++; }
+      if (y - yaricap - 1 >= 0) { top -= gec[(Math.max(0, y - yaricap - 1) * s + x) * 4]; ad--; }
       if (y >= 0 && y < s) {
-        const v = toplam / Math.max(1, adet);
-        data[(y * s + x) * 4] = v;
-        data[(y * s + x) * 4 + 1] = v;
-        data[(y * s + x) * 4 + 2] = v;
-        data[(y * s + x) * 4 + 3] = 255;
+        const v = top / Math.max(1, ad);
+        const i = (y * s + x) * 4;
+        data[i] = v; data[i + 1] = v; data[i + 2] = v; data[i + 3] = 255;
       }
     }
   }
 }
 
-/* Kanaldan parlaklık örnekleme (sarmalı) */
-function ornek(data: Uint8ClampedArray, u: number, v: number): number {
-  let uu = u % 1;
-  if (uu < 0) uu += 1;
-  let vv = v % 1;
-  if (vv < 0) vv += 1;
+function ornek(data, u, v) {
+  let uu = u % 1; if (uu < 0) uu += 1;
+  let vv = v % 1; if (vv < 0) vv += 1;
   const px = (uu * (TEX_SIZE - 1)) | 0;
   const py = ((1 - vv) * (TEX_SIZE - 1)) | 0;
   const i = (py * TEX_SIZE + px) * 4;
   return (data[i] + data[i + 1] + data[i + 2]) / 765;
 }
 
-/* Katman verisi */
-type TexLayer = {
-  data: Uint8ClampedArray;
-  blend: string;
-  depth: number;
-  scaleU: number;
-  scaleV: number;
-  offsetU: number;
-  offsetV: number;
-  rotation: number;
-};
+function blendUygula(acc, deger, mod, ilk) {
+  if (ilk) return deger;
+  if (mod === "ort") return (acc + deger) / 2;
+  if (mod === "maks") return Math.max(acc, deger);
+  if (mod === "carp") return acc * deger;
+  if (mod === "fark") return Math.abs(acc - deger);
+  return acc + deger;
+}
 
-type DisplOpts = {
-  amplitude: number;
-  invert: boolean;
-  symmetric: boolean;
-  projection: string;
-  blendSmooth: number;
-  maskBottom: number;
-  maskTop: number;
-  maskMode: string;
-  easing: string;
-  smoothing: number;
-  maskSmooth: number;
-  geoYumusatma: number;
-};
-
-/* Ana displacement */
-function applyRealDisplacement(
-  baseGeometry: THREE.BufferGeometry,
-  katmanlar: TexLayer[],
-  opts: DisplOpts,
-  maskCanvas: HTMLCanvasElement | null
-): THREE.BufferGeometry {
+/* Ana displacement — global katmanlar + bölgeler */
+function applyRealDisplacement(baseGeometry, katmanlar, bolgeler, maskeAgirlik, opts) {
   const geo = baseGeometry.clone();
   ensureUV(geo);
   const pos = geo.attributes.position;
   const nor = geo.attributes.normal;
   const uv = geo.attributes.uv;
-  if (!pos || !nor || !uv || katmanlar.length === 0) return geo;
+  if (!pos || !nor || !uv) return geo;
 
-  /* Ortalama kenar uzunluğu — diken sınırı için bir kez, ilk 3000 üçgen üzerinden. */
-  let ortKenar = 0;
-  if (geo.index) {
-    const idx = geo.index.array;
-    const ucgenOrnek = Math.min(3000, Math.floor(idx.length / 3));
-    let toplamKenar = 0;
-    let kenarAdet = 0;
-    for (let t = 0; t < ucgenOrnek; t++) {
-      const a = idx[t * 3];
-      const b = idx[t * 3 + 1];
-      const c = idx[t * 3 + 2];
-      const ax0 = pos.getX(a);
-      const ay0 = pos.getY(a);
-      const az0 = pos.getZ(a);
-      const bx0 = pos.getX(b);
-      const by0 = pos.getY(b);
-      const bz0 = pos.getZ(b);
-      const cx0 = pos.getX(c);
-      const cy0 = pos.getY(c);
-      const cz0 = pos.getZ(c);
-      toplamKenar += Math.sqrt((bx0 - ax0) ** 2 + (by0 - ay0) ** 2 + (bz0 - az0) ** 2);
-      toplamKenar += Math.sqrt((cx0 - bx0) ** 2 + (cy0 - by0) ** 2 + (cz0 - bz0) ** 2);
-      toplamKenar += Math.sqrt((ax0 - cx0) ** 2 + (ay0 - cy0) ** 2 + (az0 - cz0) ** 2);
-      kenarAdet += 3;
-    }
-    ortKenar = kenarAdet > 0 ? toplamKenar / kenarAdet : 0;
-  }
+  const ortKenar = ortalamaKenar(geo);
   const dSinir = ortKenar > 0 ? ortKenar * 6 : Infinity;
 
-  /* Doku frekansı mesh çözünürlüğünden yüksekse aliasing dikeni oluşur.
-     Katman ölçeğine göre otomatik blur uygulanır, kullanıcı değeri alt sınır kabul edilir. */
-  const islenecek = katmanlar.map((k) => {
+  const hazirla = (k) => {
     const otomatik = Math.max(opts.smoothing, Math.min(1, k.scaleU / 12));
     const yaricap = Math.round(otomatik * 6);
     if (yaricap < 1) return k;
     const kopya = new Uint8ClampedArray(k.data);
     blurImageData(kopya, TEX_SIZE, yaricap);
     return { ...k, data: kopya };
-  });
+  };
 
-  /* Maske verisi */
-  let maskeData: Uint8ClampedArray | null = null;
-  if (maskCanvas) {
-    const mctx = maskCanvas.getContext("2d", { willReadFrequently: true })!;
-    const md = mctx.getImageData(0, 0, MASK_SIZE, MASK_SIZE);
-    maskeData = new Uint8ClampedArray(md.data);
-    const mYaricap = Math.round(opts.maskSmooth * 2);
-    if (mYaricap >= 1) blurImageData(maskeData, MASK_SIZE, mYaricap);
-  }
+  const katHazir = katmanlar.map(hazirla);
+  const bolgeHazir = bolgeler
+    .filter((b) => b.gorunur && b.agirlik && b.presetId)
+    .map((b) => ({
+      ...hazirla({
+        data: getTexData(b.presetId).data,
+        scaleU: b.olcekU,
+        scaleV: b.olcekV,
+      }),
+      id: b.id,
+      agirlik: b.agirlik,
+      derinlik: b.derinlik,
+      offsetU: b.offsetU,
+      offsetV: b.offsetV,
+      rotation: b.rotasyon,
+      blend: b.blend,
+    }));
 
   const amp = opts.amplitude;
   const yon = opts.invert ? -1 : 1;
   const cosAlt = Math.cos(opts.maskBottom);
   const cosUst = Math.cos(opts.maskTop);
+  const stampAktif = opts.stampMode && opts.stampMerkez;
+  const sm = opts.stampMerkez;
+  const stampBoyut = Math.max(0.05, opts.stampBoyut * UNIT_PER_MM);
+  let su1 = null, su2 = null;
+  if (stampAktif) {
+    const nrm = new THREE.Vector3(sm.nx, sm.ny, sm.nz).normalize();
+    su1 = new THREE.Vector3(0, 1, 0);
+    if (Math.abs(nrm.y) > 0.9) su1.set(1, 0, 0);
+    su1.cross(nrm).normalize();
+    su2 = new THREE.Vector3().crossVectors(nrm, su1).normalize();
+  }
 
   for (let i = 0; i < pos.count; i++) {
-    const nx = nor.getX(i);
-    const ny = nor.getY(i);
-    const nz = nor.getZ(i);
-    const px = pos.getX(i);
-    const py = pos.getY(i);
-    const pz = pos.getZ(i);
+    const nx = nor.getX(i), ny = nor.getY(i), nz = nor.getZ(i);
+    const px = pos.getX(i), py = pos.getY(i), pz = pos.getZ(i);
 
-    /* --- Maske --- */
     let maske = 1;
-    if (maskeData) {
-      if (nz < -cosAlt) maske = 0;
-      else if (nz > cosUst && opts.maskTop > 0) maske = 0;
-
-      const mu = uv.getX(i);
-      const mv = uv.getY(i);
-      const mi =
-        ((((1 - ((mv % 1) + 1) % 1) * (MASK_SIZE - 1)) | 0) * MASK_SIZE +
-          ((((mu % 1) + 1) % 1) * (MASK_SIZE - 1))) *
-        4;
-      const firca = maskeData[mi] / 255;
-      if (opts.maskMode === "dahil") maske *= firca;
-      else maske *= 1 - firca;
-
-      if (maske <= 0.001) continue;
+    if (nz < -cosAlt) maske = 0;
+    else if (opts.maskTop > 0 && nz > cosUst) maske = 0;
+    if (maske > 0 && maskeAgirlik) {
+      const w = maskeAgirlik[i] || 0;
+      maske *= opts.maskMode === "dahil" ? w : 1 - w;
     }
+    if (maske <= 0.001) continue;
 
-    /* --- Örnekleme --- */
-    let toplam = 0;
-    let ilk = true;
-
-    for (let li = 0; li < islenecek.length; li++) {
-      const kat = islenecek[li];
-      const aci = (kat.rotation * Math.PI) / 180;
-      const ca = Math.cos(aci);
-      const sa = Math.sin(aci);
-
-      const uvDonus = (bu: number, bv: number): [number, number] => {
-        const cx = bu - 0.5;
-        const cy = bv - 0.5;
-        return [
-          (cx * ca - cy * sa + 0.5) * kat.scaleU + kat.offsetU,
-          (cx * sa + cy * ca + 0.5) * kat.scaleV + kat.offsetV,
-        ];
+    const ornekle = (kat, bu, bv) => {
+      let aci = (kat.rotation * Math.PI) / 180;
+      if (opts.rotateSides && Math.abs(nz) < 0.5) aci += Math.atan2(ny, nx);
+      const ca = Math.cos(aci), sa = Math.sin(aci);
+      const donus = (u, v) => {
+        const cx = u - 0.5, cy = v - 0.5;
+        return [(cx * ca - cy * sa + 0.5) * kat.scaleU + kat.offsetU, (cx * sa + cy * ca + 0.5) * kat.scaleV + kat.offsetV];
       };
-
-      let parlak = 0;
-
+      if (stampAktif) {
+        const dx = px - sm.x, dy = py - sm.y, dz = pz - sm.z;
+        const lu = (dx * su1.x + dy * su1.y + dz * su1.z) / stampBoyut;
+        const lv = (dx * su2.x + dy * su2.y + dz * su2.z) / stampBoyut;
+        if (Math.abs(lu) > 0.5 || Math.abs(lv) > 0.5) return 0;
+        const c = donus(lu + 0.5, lv + 0.5);
+        return ornek(kat.data, c[0], c[1]);
+      }
       if (opts.projection === "uv") {
-        const [bu, bv] = uvDonus(uv.getX(i), uv.getY(i));
-        parlak = ornek(kat.data, bu, bv);
+        const c = donus(bu, bv);
+        let p = ornek(kat.data, c[0], c[1]);
         if (opts.symmetric) {
-          const [tu, tv] = uvDonus(1 - uv.getX(i), uv.getY(i));
-          parlak = Math.max(parlak, ornek(kat.data, tu, tv));
+          const c2 = donus(1 - bu, bv);
+          p = Math.max(p, ornek(kat.data, c2[0], c2[1]));
         }
-      } else if (opts.projection === "tri") {
-        const ax = Math.abs(nx);
-        const ay = Math.abs(ny);
-        const az = Math.abs(nz);
-        const yum = Math.max(0.01, opts.blendSmooth);
-        const wx = Math.pow(ax, 1 / yum);
-        const wy = Math.pow(ay, 1 / yum);
-        const wz = Math.pow(az, 1 / yum);
+        return p;
+      }
+      if (opts.projection === "tri") {
+        const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
+        const yum = Math.max(0.05, opts.blendSmooth);
+        const wx = Math.pow(ax, 1 / yum), wy = Math.pow(ay, 1 / yum), wz = Math.pow(az, 1 / yum);
         const wt = wx + wy + wz || 1;
-        const sx = px * 0.2 + 0.5;
-        const sy = py * 0.2 + 0.5;
-        const sz = pz * 0.2 + 0.5;
-        const p1 = ornek(kat.data, ...[uvDonus(sz, sy)][0]);
-        const p2 = ornek(kat.data, ...[uvDonus(sx, sy)][0]);
-        const p3 = ornek(kat.data, ...[uvDonus(sx, sz)][0]);
-        parlak = (p1 * wx + p2 * wy + p3 * wz) / wt;
-      } else if (opts.projection === "kutu") {
-        const ax = Math.abs(nx);
-        const ay = Math.abs(ny);
-        const az = Math.abs(nz);
-        if (ax >= ay && ax >= az) {
-          parlak = ornek(kat.data, ...[uvDonus(pz * 0.2 + 0.5, py * 0.2 + 0.5)][0]);
-        } else if (ay >= az) {
-          parlak = ornek(kat.data, ...[uvDonus(px * 0.2 + 0.5, pz * 0.2 + 0.5)][0]);
-        } else {
-          parlak = ornek(kat.data, ...[uvDonus(px * 0.2 + 0.5, py * 0.2 + 0.5)][0]);
-        }
-      } else {
-        const r = Math.sqrt(px * px + py * py + pz * pz) || 1;
-        const su = Math.atan2(pz, px) / (Math.PI * 2) + 0.5;
-        const sv = Math.acos(Math.max(-1, Math.min(1, py / r))) / Math.PI;
-        parlak = ornek(kat.data, ...[uvDonus(su, sv)][0]);
+        const sx = px * 0.2 + 0.5, sy = py * 0.2 + 0.5, sz = pz * 0.2 + 0.5;
+        const c1 = donus(sz, sy), c2 = donus(sx, sy), c3 = donus(sx, sz);
+        return (ornek(kat.data, c1[0], c1[1]) * wx + ornek(kat.data, c2[0], c2[1]) * wy + ornek(kat.data, c3[0], c3[1]) * wz) / wt;
       }
-
-      parlak = uygulaEasing(Math.max(0, Math.min(1, parlak)), opts.easing);
-      parlak *= kat.depth;
-
-      if (ilk) {
-        toplam = parlak;
-        ilk = false;
-      } else if (kat.blend === "ort") {
-        toplam = (toplam + parlak) / 2;
-      } else if (kat.blend === "maks") {
-        toplam = Math.max(toplam, parlak);
-      } else if (kat.blend === "carp") {
-        toplam = toplam * parlak;
-      } else if (kat.blend === "fark") {
-        toplam = Math.abs(toplam - parlak);
-      } else {
-        toplam = toplam + parlak;
+      if (opts.projection === "kutu") {
+        const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
+        let c;
+        if (ax >= ay && ax >= az) c = donus(pz * 0.2 + 0.5, py * 0.2 + 0.5);
+        else if (ay >= az) c = donus(px * 0.2 + 0.5, pz * 0.2 + 0.5);
+        else c = donus(px * 0.2 + 0.5, py * 0.2 + 0.5);
+        return ornek(kat.data, c[0], c[1]);
       }
+      const r = Math.hypot(px, py, pz) || 1;
+      const su = Math.atan2(pz, px) / (Math.PI * 2) + 0.5;
+      const sv = Math.acos(Math.max(-1, Math.min(1, py / r))) / Math.PI;
+      const c = donus(su, sv);
+      return ornek(kat.data, c[0], c[1]);
+    };
+
+    const bu = uv.getX(i), bv = uv.getY(i);
+
+    let globalTop = 0;
+    let ilk = true;
+    for (let li = 0; li < katHazir.length; li++) {
+      const kat = katHazir[li];
+      let p = uygulaEasing(Math.max(0, Math.min(1, ornekle(kat, bu, bv))), opts.easing) * kat.depth;
+      globalTop = blendUygula(globalTop, p, kat.blend, ilk);
+      ilk = false;
     }
 
+    let bolgeTop = 0;
+    let bolgeIlk = true;
+    let bolgeVar = false;
+    for (let bi = 0; bi < bolgeHazir.length; bi++) {
+      const b = bolgeHazir[bi];
+      const w = b.agirlik[i] || 0;
+      if (w <= 0.002) continue;
+      bolgeVar = true;
+      const p = uygulaEasing(Math.max(0, Math.min(1, ornekle(b, bu, bv))), opts.easing) * (b.derinlik / 5) * w;
+      bolgeTop = blendUygula(bolgeTop, p, b.blend, bolgeIlk);
+      bolgeIlk = false;
+    }
+
+    let toplam = bolgeVar ? bolgeTop : globalTop;
     if (toplam <= 0.0001) continue;
     if (toplam > 1) toplam = 1;
 
@@ -937,28 +981,103 @@ function applyRealDisplacement(
   }
 
   pos.needsUpdate = true;
-
-  /* Opsiyonel geometri yumuşatma — normallerden önce */
   if (opts.geoYumusatma > 0) {
     const gecis = Math.max(1, Math.round(opts.geoYumusatma * 2));
-    const agirlik = Math.min(0.6, opts.geoYumusatma * 0.5);
-    for (let p = 0; p < gecis; p++) pozisyonYumusat(geo, agirlik);
+    const ag = Math.min(0.6, opts.geoYumusatma * 0.5);
+    for (let p = 0; p < gecis; p++) pozisyonYumusat(geo, ag);
   }
-
   geo.computeBoundingBox();
   geo.computeVertexNormals();
   return geo;
 }
 
-/* ------------------------------------------------------------
+/* Export için gerçek yeniden örnekleme */
+function subdivize(geo) {
+  const idx = geo.index;
+  const pos = geo.attributes.position;
+  const yeni = [];
+  for (let i = 0; i < pos.count; i++) yeni.push(pos.getX(i), pos.getY(i), pos.getZ(i));
+  const orta = new Map();
+  const ortaAl = (a, b) => {
+    const k = a < b ? a * 1e7 + b : b * 1e7 + a;
+    const v = orta.get(k);
+    if (v !== undefined) return v;
+    const i = yeni.length / 3;
+    yeni.push((pos.getX(a) + pos.getX(b)) / 2, (pos.getY(a) + pos.getY(b)) / 2, (pos.getZ(a) + pos.getZ(b)) / 2);
+    orta.set(k, i);
+    return i;
+  };
+  const out = [];
+  for (let t = 0; t < idx.count; t += 3) {
+    const a = idx.getX(t), b = idx.getX(t + 1), c = idx.getX(t + 2);
+    const ab = ortaAl(a, b), bc = ortaAl(b, c), ca = ortaAl(c, a);
+    out.push(a, ab, ca, ab, b, bc, ca, bc, c, ab, bc, ca);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(yeni, 3));
+  g.setIndex(out);
+  return kaynakla(g);
+}
+
+function decimate(geo, hücre) {
+  const pos = geo.attributes.position;
+  const idx = geo.index;
+  const map = new Map();
+  const temsil = [];
+  const remap = new Int32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    const k = `${Math.round(x / hücre)}|${Math.round(y / hücre)}|${Math.round(z / hücre)}`;
+    let h = map.get(k);
+    if (h === undefined) {
+      h = temsil.length / 3;
+      map.set(k, h);
+      temsil.push(x, y, z);
+    }
+    remap[i] = h;
+  }
+  const out = [];
+  for (let t = 0; t < idx.count; t += 3) {
+    const a = remap[idx.getX(t)], b = remap[idx.getX(t + 1)], c = remap[idx.getX(t + 2)];
+    if (a === b || b === c || a === c) continue;
+    out.push(a, b, c);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(temsil, 3));
+  g.setIndex(out);
+  return kaynakla(g);
+}
+
+function yenidenOrnekle(geo, hedefMm) {
+  const hedef = Math.max(0.005, hedefMm * UNIT_PER_MM);
+  let g = geo.clone();
+  let ort = ortalamaKenar(g);
+  let guard = 0;
+  while (ort > hedef * 1.5 && guard < 3 && g.attributes.position.count < 700000) {
+    const ng = subdivize(g);
+    g.dispose();
+    g = ng;
+    ort = ortalamaKenar(g);
+    guard++;
+  }
+  if (ort < hedef * 0.55) {
+    const ng = decimate(g, hedef);
+    g.dispose();
+    g = ng;
+  }
+  ensureUV(g);
+  g.computeBoundingBox();
+  return g;
+}
+
+/* ============================================================
    İKON SİSTEMİ
-   ------------------------------------------------------------ */
-const ICON_PATHS: Record<string, React.ReactNode> = {
+   ============================================================ */
+const ICON_PATHS = {
   upload: (<><path d="M12 15V3" /><path d="M7 8l5-5 5 5" /><path d="M3 15v4a2 2 0 002 2h14a2 2 0 002-2v-4" /></>),
   download: (<><path d="M12 3v12" /><path d="M7 10l5 5 5-5" /><path d="M3 15v4a2 2 0 002 2h14a2 2 0 002-2v-4" /></>),
   cube: (<><path d="M12 2.8l8 4.6v9.2l-8 4.6-8-4.6V7.4z" /><path d="M4 7.4l8 4.6 8-4.6" /><path d="M12 12v9.2" /></>),
   layers: (<><path d="M12 2.8l9 4.7-9 4.7-9-4.7z" /><path d="M3 12.4l9 4.7 9-4.7" /><path d="M3 17.1l9 4.7 9-4.7" /></>),
-  sliders: (<><path d="M4 6h8" /><path d="M16 6h4" /><path d="M4 12h4" /><path d="M12 12h8" /><path d="M4 18h12" /><path d="M20 18h0" /><circle cx="14" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" /></>),
   palette: (<><path d="M12 3a9 9 0 100 18h1.5a2 2 0 001.6-3.2 2 2 0 011.6-3.2H19a2.8 2.8 0 002.8-2.8A8.8 8.8 0 0012 3z" /><circle cx="8" cy="9" r="1" /><circle cx="12" cy="7" r="1" /><circle cx="16" cy="9.5" r="1" /></>),
   eye: (<><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z" /><circle cx="12" cy="12" r="2.6" /></>),
   "eye-off": (<><path d="M3 3l18 18" /><path d="M10.6 6.1A9.9 9.9 0 0112 6c6.4 0 10 6 10 6a17.6 17.6 0 01-3.1 3.8" /><path d="M6.4 7.8A17.4 17.4 0 002 12s3.6 6 10 6a9.6 9.6 0 003.3-.6" /><path d="M9.9 10a2.9 2.9 0 004.1 4.1" /></>),
@@ -969,85 +1088,55 @@ const ICON_PATHS: Record<string, React.ReactNode> = {
   ruler: (<><path d="M15.5 2.5l6 6-13 13-6-6z" /><path d="M9 9l1.8 1.8" /><path d="M12 6l1.8 1.8" /><path d="M6 12l1.8 1.8" /></>),
   image: (<><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="8.5" cy="9.5" r="1.6" /><path d="M21 16l-5-5-6 6-3-3-4 4" /></>),
   "chevron-down": <path d="M6 9l6 6 6-6" />,
-  "chevron-right": <path d="M9 6l6 6-6 6" />,
   "chevron-up": <path d="M6 15l6-6 6 6" />,
   x: (<><path d="M6 6l12 12" /><path d="M18 6L6 18" /></>),
   folder: <path d="M3 7a2 2 0 012-2h4l2 2.5h8a2 2 0 012 2V18a2 2 0 01-2 2H5a2 2 0 01-2-2z" />,
-  box: (<><path d="M3.5 7.5L12 3l8.5 4.5v9L12 21l-8.5-4.5z" /><path d="M3.5 7.5L12 12l8.5-4.5" /><path d="M12 12v9" /></>),
-  zap: <path d="M13 2L4 14h6l-1 8 9-12h-6z" />,
   gauge: (<><path d="M12 20a8 8 0 110-16 8 8 0 010 16z" /><path d="M12 12l4-3.5" /><circle cx="12" cy="12" r="1.4" /></>),
-  database: (<><ellipse cx="12" cy="5.5" rx="7.5" ry="3" /><path d="M4.5 5.5v13c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-13" /><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3" /></>),
   brush: (<><path d="M9.5 14.5L4 20" /><path d="M14 4.5l5.5 5.5" /><path d="M8.5 9.5l6 6" /><path d="M14.5 3.5l6 6-6 6-6-6z" /></>),
-  bucket: (<><path d="M5 11l7-7 7 7-7 7z" /><path d="M5 11v5a3 3 0 003 3h8" /></>),
   eraser: (<><path d="M8 20H4a1.5 1.5 0 01-1.1-2.6L14 6.3a1.5 1.5 0 012.1 0l4.6 4.6a1.5 1.5 0 010 2.1L13 20z" /><path d="M9 11l6 6" /></>),
   undo: (<><path d="M4 8h9a5 5 0 010 10H8" /><path d="M4 8l4-4" /><path d="M4 8l4 4" /></>),
   redo: (<><path d="M20 8h-9a5 5 0 000 10h5" /><path d="M20 8l-4-4" /><path d="M20 8l-4 4" /></>),
   plus: (<><path d="M12 5v14" /><path d="M5 12h14" /></>),
-  minus: <path d="M5 12h14" />,
   lock: (<><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 018 0v3" /></>),
   unlock: (<><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 017.5-2" /></>),
-  flip: (<><path d="M12 3v18" /><path d="M7 7l-4 5 4 5z" /><path d="M17 7l4 5-4 5z" /></>),
   stamp: (<><path d="M6 21h12" /><path d="M8 17h8v-2a2 2 0 00-1-1.7l-1-.6a2 2 0 01-1-1.7V8a3 3 0 116 0" /><path d="M5 17h14" /></>),
   mask: (<><path d="M3 6.5c3 0 4-1.5 9-1.5s6 1.5 9 1.5v5c0 4-4 8-9 8s-9-4-9-8z" /><circle cx="8.5" cy="11" r="1.2" /><circle cx="15.5" cy="11" r="1.2" /></>),
   save: (<><path d="M4 5a1 1 0 011-1h11l4 4v11a1 1 0 01-1 1H5a1 1 0 01-1-1z" /><path d="M8 4v6h8V4" /><path d="M8 20v-6h8v6" /></>),
   open: (<><path d="M3 7a2 2 0 012-2h4l2 2.5h6a2 2 0 012 2V11" /><path d="M3 7v12a1 1 0 001 1h13.5a1 1 0 00.9-.6L22 12H7.5a1 1 0 00-.9.6L3 19" /></>),
-  settings: (<><circle cx="12" cy="12" r="3" /><path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6" /></>),
-  info: (<><circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h0" /></>),
-  star: <path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.8-5.2-2.8-5.2 2.8 1-5.8L3.5 9.7l5.9-.8z" />,
   trash: (<><path d="M4 7h16" /><path d="M9 7V4h6v3" /><path d="M6 7l1 13h10l1-13" /><path d="M10 11v6M14 11v6" /></>),
   copy: (<><rect x="9" y="9" width="12" height="12" rx="2" /><path d="M15 9V5a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2h4" /></>),
   refresh: (<><path d="M20 11a8 8 0 10-2.3 5.7" /><path d="M20 4v7h-7" /></>),
   target: (<><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3.2" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3" /></>),
   magnet: (<><path d="M6 4v8a6 6 0 0012 0V4" /><path d="M6 9h4M14 9h4" /></>),
-  paint: (<><path d="M5 3h9l3 3v9H8L5 12z" /><path d="M14 3v4h4" /><path d="M12 15v4a2 2 0 004 0v-2" /></>),
-  droplet: <path d="M12 3s6 6.4 6 10a6 6 0 11-12 0c0-3.6 6-10 6-10z" />,
-  sun: (<><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2 12h2M20 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4" /></>),
-  moon: <path d="M20 14.5A8.5 8.5 0 019.5 4a8.5 8.5 0 1010.5 10.5z" />,
-  cpu: (<><rect x="6" y="6" width="12" height="12" rx="2" /><rect x="10" y="10" width="4" height="4" rx="1" /><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /></>),
-  activity: <path d="M2 12h4l3-8 4 16 3-8h6" />,
-  maximize: (<><path d="M4 9V4h5" /><path d="M20 9V4h-5" /><path d="M4 15v5h5" /><path d="M20 15v5h-5" /></>),
+  shuffle: (<><path d="M16 3h5v5" /><path d="M4 20L21 3" /><path d="M21 16v5h-5" /><path d="M15 15l6 6" /><path d="M4 4l5 5" /></>),
+  scissors: (<><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M20 4L8.12 15.88" /><path d="M14.47 14.48L20 20" /><path d="M8.12 8.12L12 12" /></>),
 };
 
-function Icon({ name, size = 16, className = "" }: { name: string; size?: number; className?: string }) {
+function Icon({ name, size = 16, className = "" }) {
   const path = ICON_PATHS[name];
   if (!path) return null;
   return (
-    <svg
-      viewBox="0 0 24 24"
-      width={size}
-      height={size}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden="true"
-      focusable="false"
-    >
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true" focusable="false">
       {path}
     </svg>
   );
 }
 
-/* ------------------------------------------------------------
-   FPS ÖLÇER
-   ------------------------------------------------------------ */
 function FpsMeter() {
   const [fps, setFps] = useState(0);
-  const kareRef = useRef(0);
-  const baslaRef = useRef(0);
+  const kare = useRef(0);
+  const basla = useRef(0);
   useEffect(() => {
     let raf = 0;
-    baslaRef.current = performance.now();
-    kareRef.current = 0;
-    const dongu = (t: number) => {
-      kareRef.current += 1;
-      const gecen = t - baslaRef.current;
+    basla.current = performance.now();
+    kare.current = 0;
+    const dongu = (t) => {
+      kare.current += 1;
+      const gecen = t - basla.current;
       if (gecen >= 500) {
-        setFps(Math.round((kareRef.current * 1000) / gecen));
-        kareRef.current = 0;
-        baslaRef.current = t;
+        setFps(Math.round((kare.current * 1000) / gecen));
+        kare.current = 0;
+        basla.current = t;
       }
       raf = requestAnimationFrame(dongu);
     };
@@ -1057,12 +1146,9 @@ function FpsMeter() {
   return <span className="mono tnum text-faint">{fps} FPS</span>;
 }
 
-/* ------------------------------------------------------------
-   EKSEN GİZMOSU
-   ------------------------------------------------------------ */
 function AxisGizmo() {
   return (
-    <svg viewBox="0 0 60 60" width={60} height={60} className="pointer-events-none absolute right-3 top-3 opacity-80" aria-hidden="true">
+    <svg viewBox="0 0 60 60" width={56} height={56} className="pointer-events-none absolute right-3 top-3 opacity-80" aria-hidden="true">
       <circle cx="30" cy="30" r="1.6" fill="#6e7787" />
       <path d="M30 30L30 12" stroke="#ef4444" strokeWidth="1.5" strokeLinecap="round" />
       <path d="M30 30L45 38" stroke="#22c55e" strokeWidth="1.5" strokeLinecap="round" />
@@ -1075,215 +1161,274 @@ function AxisGizmo() {
 }
 
 /* ------------------------------------------------------------
-   MODEL BİLEŞENİ — displaced geometri local state'te
+   MODEL — displaced geometri, bölge renklendirme, kesit
    ------------------------------------------------------------ */
-function Model({
-  baseGeometry,
-  layers,
-  opts,
-  maskCanvas,
-  maskVersion,
-  color,
-  wireframe,
-  metalness,
-  roughness,
-  preview3D,
-  geoRef,
-  onMaskHit,
-  onSize,
-  maskAktif,
-}: {
-  baseGeometry: THREE.BufferGeometry;
-  layers: any[];
-  opts: any;
-  maskCanvas: HTMLCanvasElement | null;
-  maskVersion: number;
-  color: string;
-  wireframe: boolean;
-  metalness: number;
-  roughness: number;
-  preview3D: boolean;
-  geoRef: React.MutableRefObject<THREE.BufferGeometry | null>;
-  onMaskHit: (u: number, v: number) => void;
-  onSize: (s: { x: number; y: number; z: number }) => void;
-  maskAktif: boolean;
-}) {
-  const [displaced, setDisplaced] = useState<THREE.BufferGeometry>(() => baseGeometry.clone());
+function Model({ baseGeometry, layers, bolgeler, maskeAgirlik, opts, renkVersion, color, wireframe, metalness, roughness, preview3D, bolgeleriGoster, kesitAktif, kesitY, geoRef, graf, arac, onHit, onSize, surukleBoya }) {
+  const [displaced, setDisplaced] = useState(() => baseGeometry.clone());
+  const onceki = useRef(null);
+  const { camera, size } = useThree();
+  const boyamaRef = useRef(false);
 
-  /* Displacement'ı geciktirerek çalıştır; önizleme kapalıysa atla */
+  const plane = useMemo(() => new THREE.Plane(new THREE.Vector3(0, -1, 0), kesitY), [kesitY]);
+
   useEffect(() => {
     let iptal = false;
     const zaman = setTimeout(() => {
       if (iptal) return;
-      let g: THREE.BufferGeometry;
-      if (!preview3D) {
-        g = baseGeometry.clone();
-      } else {
-        const gecerli = layers.filter((l) => l.visible);
-        const texLayers: TexLayer[] = gecerli.map((l) => ({
+      let g;
+      if (!preview3D) g = baseGeometry.clone();
+      else {
+        const gecerli = layers.filter((l) => l.visible).map((l) => ({
           data: getTexData(l.presetId).data,
-          blend: l.blend,
-          depth: l.depth,
-          scaleU: l.scaleU,
-          scaleV: l.scaleV,
-          offsetU: l.offsetU,
-          offsetV: l.offsetV,
-          rotation: l.rotation,
+          blend: l.blend, depth: l.depth, scaleU: l.scaleU, scaleV: l.scaleV,
+          offsetU: l.offsetU, offsetV: l.offsetV, rotation: l.rotation,
         }));
-        g = applyRealDisplacement(baseGeometry, texLayers, opts, maskCanvas);
+        g = applyRealDisplacement(baseGeometry, gecerli, bolgeler, maskeAgirlik, opts);
+      }
+      if (bolgeleriGoster && bolgeler.length) {
+        const n = g.attributes.position.count;
+        const arr = new Float32Array(n * 3);
+        const taban = new THREE.Color(color);
+        const rc = bolgeler.map((b) => new THREE.Color(b.renk));
+        for (let i = 0; i < n; i++) {
+          let r = taban.r, gg = taban.g, bb = taban.b;
+          for (let bi = 0; bi < bolgeler.length; bi++) {
+            const w = bolgeler[bi].agirlik ? bolgeler[bi].agirlik[i] || 0 : 0;
+            if (w <= 0.01) continue;
+            const c = rc[bi];
+            r = r * (1 - w) + c.r * w;
+            gg = gg * (1 - w) + c.g * w;
+            bb = bb * (1 - w) + c.b * w;
+          }
+          arr[i * 3] = r; arr[i * 3 + 1] = gg; arr[i * 3 + 2] = bb;
+        }
+        g.setAttribute("color", new THREE.Float32BufferAttribute(arr, 3));
       }
       setDisplaced(g);
       geoRef.current = g;
       g.computeBoundingBox();
       const b = new THREE.Vector3();
-      g.boundingBox!.getSize(b);
+      g.boundingBox.getSize(b);
       onSize({ x: b.x, y: b.y, z: b.z });
     }, 60);
+    return () => { iptal = true; clearTimeout(zaman); };
+  }, [baseGeometry, layers, bolgeler, maskeAgirlik, opts, renkVersion, preview3D, bolgeleriGoster, color, geoRef, onSize]);
 
-    return () => {
-      iptal = true;
-      clearTimeout(zaman);
-    };
-  }, [baseGeometry, layers, opts, maskCanvas, maskVersion, geoRef, onSize, preview3D]);
+  useEffect(() => {
+    const p = onceki.current;
+    onceki.current = displaced;
+    if (p && p !== displaced) p.dispose();
+  }, [displaced]);
 
-  /* Geometri temizliği */
-  useEffect(() => () => displaced.dispose(), [displaced]);
+  useEffect(() => () => { if (onceki.current) onceki.current.dispose(); onceki.current = null; }, []);
+
+  useEffect(() => {
+    const up = () => { boyamaRef.current = false; };
+    window.addEventListener("pointerup", up);
+    return () => window.removeEventListener("pointerup", up);
+  }, []);
+
+  const hit = (e, zorla) => {
+    if (!arac && !opts.stampMode) return;
+    if (e.faceIndex == null) return;
+    e.stopPropagation();
+    onHit({
+      faceIndex: e.faceIndex,
+      point: e.point.clone(),
+      normal: e.face ? e.face.normal.clone() : new THREE.Vector3(0, 1, 0),
+      camera, width: size.width, height: size.height,
+      zorla,
+    });
+  };
 
   return (
-    <mesh
-      geometry={displaced}
-      onPointerDown={(e) => {
-        if (!maskAktif || !e.uv) return;
-        onMaskHit(e.uv.x, e.uv.y);
-      }}
-    >
-      <meshStandardMaterial
-        color={color}
-        wireframe={wireframe}
-        metalness={metalness}
-        roughness={roughness}
-      />
-    </mesh>
+    <group>
+      <mesh
+        geometry={displaced}
+        onPointerDown={(e) => { boyamaRef.current = true; hit(e, true); }}
+        onPointerMove={(e) => { if (boyamaRef.current && surukleBoya) hit(e, false); }}
+      >
+        <meshStandardMaterial
+          color={bolgeleriGoster && bolgeler.length ? "#ffffff" : color}
+          vertexColors={bolgeleriGoster && bolgeler.length > 0}
+          wireframe={wireframe}
+          metalness={metalness}
+          roughness={roughness}
+          clippingPlanes={kesitAktif ? [plane] : []}
+          clipShadows
+          side={THREE.FrontSide}
+        />
+      </mesh>
+      {kesitAktif ? (
+        <mesh position={[0, kesitY, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <planeGeometry args={[9, 9]} />
+          <meshBasicMaterial color="#22d3ee" transparent opacity={0.07} side={THREE.DoubleSide} depthWrite={false} />
+        </mesh>
+      ) : null}
+      {opts.stampMode && opts.stampMerkez ? (
+        <mesh position={[opts.stampMerkez.x, opts.stampMerkez.y, opts.stampMerkez.z]}>
+          <sphereGeometry args={[0.07, 12, 12]} />
+          <meshBasicMaterial color="#fbbf24" />
+        </mesh>
+      ) : null}
+      {graf ? null : null}
+    </group>
   );
 }
 
 /* ------------------------------------------------------------
-   3MF PAKETLEME YARDIMCISI
+   3MF PAKETLEME
    ------------------------------------------------------------ */
-function ucgenXmlKur(geo: THREE.BufferGeometry): string {
+function ucgenXmlKur(geo) {
   const pos = geo.attributes.position;
   const idx = geo.index;
-  const harita = new Map<string, number>();
-  const koordinat: number[] = [];
-  const ucgenler: string[] = [];
-
-  const vertexAl = (i: number): number => {
-    const x = pos.getX(i) * MM_PER_UNIT;
-    const y = pos.getY(i) * MM_PER_UNIT;
-    const z = pos.getZ(i) * MM_PER_UNIT;
-    const anahtar = `${x.toFixed(3)}|${y.toFixed(3)}|${z.toFixed(3)}`;
-    const varOlan = harita.get(anahtar);
-    if (varOlan !== undefined) return varOlan;
-    const yeni = harita.size;
-    harita.set(anahtar, yeni);
-    koordinat.push(x, y, z);
-    return yeni;
+  const harita = new Map();
+  const koord = [];
+  const ucgenler = [];
+  const al = (i) => {
+    const x = pos.getX(i) * MM_PER_UNIT, y = pos.getY(i) * MM_PER_UNIT, z = pos.getZ(i) * MM_PER_UNIT;
+    const k = `${x.toFixed(3)}|${y.toFixed(3)}|${z.toFixed(3)}`;
+    const v = harita.get(k);
+    if (v !== undefined) return v;
+    const y2 = harita.size;
+    harita.set(k, y2);
+    koord.push(x, y, z);
+    return y2;
   };
-
   if (idx) {
     for (let t = 0; t < idx.count; t += 3) {
-      const a = vertexAl(idx.getX(t));
-      const b = vertexAl(idx.getX(t + 1));
-      const c = vertexAl(idx.getX(t + 2));
+      const a = al(idx.getX(t)), b = al(idx.getX(t + 1)), c = al(idx.getX(t + 2));
       if (a === b || b === c || a === c) continue;
       ucgenler.push(`<triangle v1="${a}" v2="${b}" v3="${c}"/>`);
     }
   } else {
     for (let t = 0; t + 2 < pos.count; t += 3) {
-      const a = vertexAl(t);
-      const b = vertexAl(t + 1);
-      const c = vertexAl(t + 2);
+      const a = al(t), b = al(t + 1), c = al(t + 2);
       if (a === b || b === c || a === c) continue;
       ucgenler.push(`<triangle v1="${a}" v2="${b}" v3="${c}"/>`);
     }
   }
-
-  const vertexXml: string[] = [];
-  for (let i = 0; i < koordinat.length; i += 3) {
-    vertexXml.push(
-      `<vertex x="${koordinat[i].toFixed(3)}" y="${koordinat[i + 1].toFixed(3)}" z="${koordinat[i + 2].toFixed(3)}"/>`
-    );
-  }
-
+  const vx = [];
+  for (let i = 0; i < koord.length; i += 3) vx.push(`<vertex x="${koord[i].toFixed(3)}" y="${koord[i + 1].toFixed(3)}" z="${koord[i + 2].toFixed(3)}"/>`);
   return (
-    `<?xml version="1.0" encoding="UTF-8"?>\n` +
-    `<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n` +
-    `<resources>\n<object id="1" type="model">\n<mesh>\n<vertices>\n` +
-    vertexXml.join("\n") +
-    `\n</vertices>\n<triangles>\n` +
-    ucgenler.join("\n") +
-    `\n</triangles>\n</mesh>\n</object>\n</resources>\n` +
-    `<build><item objectid="1"/></build>\n</model>`
+    `<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n<resources>\n<object id="1" type="model">\n<mesh>\n<vertices>\n` +
+    vx.join("\n") + `\n</vertices>\n<triangles>\n` + ucgenler.join("\n") +
+    `\n</triangles>\n</mesh>\n</object>\n</resources>\n<build><item objectid="1"/></build>\n</model>`
   );
 }
 
-const CONTENT_TYPES_XML =
-  `<?xml version="1.0" encoding="UTF-8"?>\n` +
-  `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n` +
-  `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n` +
-  `<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n` +
-  `</Types>`;
+const CONTENT_TYPES_XML = `<?xml version="1.0" encoding="UTF-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n</Types>`;
+const RELS_XML = `<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n<Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n</Relationships>`;
 
-const RELS_XML =
-  `<?xml version="1.0" encoding="UTF-8"?>\n` +
-  `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n` +
-  `<Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n` +
-  `</Relationships>`;
+function u8ToB64(u8) {
+  let s = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < u8.length; i += chunk) s += String.fromCharCode.apply(null, u8.subarray(i, i + chunk));
+  return btoa(s);
+}
+function b64ToU8(b) {
+  const s = atob(b);
+  const u = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+  return u;
+}
+function agirlikPaketle(a) {
+  if (!a) return null;
+  const u = new Uint8Array(a.length);
+  for (let i = 0; i < a.length; i++) u[i] = Math.round(Math.max(0, Math.min(1, a[i])) * 255);
+  return u8ToB64(u);
+}
+function agirlikAc(b, n) {
+  if (!b) return new Float32Array(n);
+  const u = b64ToU8(b);
+  const a = new Float32Array(n);
+  for (let i = 0; i < Math.min(n, u.length); i++) a[i] = u[i] / 255;
+  return a;
+}
 
-/* ------------------------------------------------------------
+function manifoldDenetle(geo) {
+  const idx = geo.index;
+  if (!idx) return { sinir: 0, nonManifold: 0, dejenere: 0 };
+  const kenar = new Map();
+  let dejenere = 0;
+  const pos = geo.attributes.position;
+  for (let t = 0; t < idx.count; t += 3) {
+    const a = idx.getX(t), b = idx.getX(t + 1), c = idx.getX(t + 2);
+    if (a === b || b === c || a === c) { dejenere++; continue; }
+    const ax = pos.getX(a), ay = pos.getY(a), az = pos.getZ(a);
+    const bx = pos.getX(b), by = pos.getY(b), bz = pos.getZ(b);
+    const cx = pos.getX(c), cy = pos.getY(c), cz = pos.getZ(c);
+    const alan = Math.hypot((bx - ax) * (cy - ay) - (by - ay) * (cx - ax), (by - ay) * (cz - az) - (bz - az) * (cy - ay), (bz - az) * (cx - ax) - (cz - az) * (bx - ax)) / 2;
+    if (alan < 1e-10) { dejenere++; continue; }
+    for (const [p, q] of [[a, b], [b, c], [c, a]]) {
+      const k = p < q ? p * 1e7 + q : q * 1e7 + p;
+      kenar.set(k, (kenar.get(k) || 0) + 1);
+    }
+  }
+  let sinir = 0, nonManifold = 0;
+  kenar.forEach((v) => { if (v === 1) sinir++; else if (v > 2) nonManifold++; });
+  return { sinir, nonManifold, dejenere };
+}
+
+function hacimHesapla(geo) {
+  const idx = geo.index;
+  const pos = geo.attributes.position;
+  if (!idx) return 0;
+  let v = 0;
+  for (let t = 0; t < idx.count; t += 3) {
+    const a = idx.getX(t), b = idx.getX(t + 1), c = idx.getX(t + 2);
+    const ax = pos.getX(a) * MM_PER_UNIT, ay = pos.getY(a) * MM_PER_UNIT, az = pos.getZ(a) * MM_PER_UNIT;
+    const bx = pos.getX(b) * MM_PER_UNIT, by = pos.getY(b) * MM_PER_UNIT, bz = pos.getZ(b) * MM_PER_UNIT;
+    const cx = pos.getX(c) * MM_PER_UNIT, cy = pos.getY(c) * MM_PER_UNIT, cz = pos.getZ(c) * MM_PER_UNIT;
+    v += (ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx)) / 6;
+  }
+  return Math.abs(v);
+}
+
+/* ============================================================
    ANA SAYFA
-   ------------------------------------------------------------ */
+   ============================================================ */
 export default function Page() {
-  const [mode, setMode] = useState<"kup" | "stl">("kup");
-  const [viewMode, setViewMode] = useState<"dolu" | "tel" | "kesit">("dolu");
+  const [mode, setMode] = useState("kup");
+  const [viewMode, setViewMode] = useState("dolu");
   const [color, setColor] = useState(DEFAULT_COLOR);
   const [metalness, setMetalness] = useState(DEFAULT_METALNESS);
   const [roughness, setRoughness] = useState(DEFAULT_ROUGHNESS);
+  const [kesitY, setKesitY] = useState(0);
 
-  const [fileName, setFileName] = useState<string>("");
-  const [fileSizeKB, setFileSizeKB] = useState<number>(0);
+  const [fileName, setFileName] = useState("");
+  const [fileSizeKB, setFileSizeKB] = useState(0);
   const [sizeMm, setSizeMm] = useState({ x: 50, y: 50, z: 50 });
   const [surukleAktif, setSurukleAktif] = useState(false);
 
-  const [category, setCategory] = useState<string>("tumu");
-  const [arama, setArama] = useState<string>("");
-  const [thumbs, setThumbs] = useState<Record<string, string>>({});
-
-  /* Özel haritalar */
-  const [ozelHaritalar, setOzelHaritalar] = useState<{ id: string; name: string }[]>([]);
-  const [yuklemeDurum, setYuklemeDurum] = useState<string>("");
-  const ozelInputRef = useRef<HTMLInputElement | null>(null);
-  const stlInputRef = useRef<HTMLInputElement | null>(null);
+  const [category, setCategory] = useState("tumu");
+  const [arama, setArama] = useState("");
+  const [thumbs, setThumbs] = useState({});
+  const [ozelHaritalar, setOzelHaritalar] = useState([]);
+  const [yuklemeDurum, setYuklemeDurum] = useState("");
+  const ozelInputRef = useRef(null);
+  const stlInputRef = useRef(null);
+  const projeInputRef = useRef(null);
   const ozelSayac = useRef(0);
 
-  /* Katmanlar */
-  const [layers, setLayers] = useState<any[]>([
-    {
-      id: "kat1",
-      presetId: "kristal",
-      blend: "ekle",
-      depth: 1,
-      visible: true,
-      scaleU: 1,
-      scaleV: 1,
-      offsetU: 0,
-      offsetV: 0,
-      rotation: 0,
-    },
+  const [layers, setLayers] = useState([
+    { id: "kat1", presetId: "kristal", blend: "ekle", depth: 1, visible: true, scaleU: 1, scaleV: 1, offsetU: 0, offsetV: 0, rotation: 0 },
   ]);
-  const [activeLayer, setActiveLayer] = useState<string>("kat1");
+  const [activeLayer, setActiveLayer] = useState("kat1");
 
-  /* Kabartma */
+  const [bolgeler, setBolgeler] = useState([]);
+  const [aktifBolge, setAktifBolge] = useState(null);
+  const [bolgeleriGoster, setBolgeleriGoster] = useState(true);
+  const [arac, setArac] = useState(null);
+  const [fircaMm, setFircaMm] = useState(8);
+  const [featherMm, setFeatherMm] = useState(3);
+  const [lassoNokta, setLassoNokta] = useState([]);
+  const lassoRef = useRef([]);
+  const [renkVersion, setRenkVersion] = useState(0);
+
+  const [maskeAgirlik, setMaskeAgirlik] = useState(null);
+  const [maskeArac, setMaskeArac] = useState(false);
+
   const [amplitudeMm, setAmplitudeMm] = useState(1.22);
   const [invert, setInvert] = useState(false);
   const [symmetric, setSymmetric] = useState(false);
@@ -1292,12 +1437,12 @@ export default function Page() {
   const [geoYumusatma, setGeoYumusatma] = useState(0);
   const [invertTexture, setInvertTexture] = useState(false);
 
-  /* Yansıtma */
-  const [projection, setProjection] = useState("uv");
+  const [projection, setProjection] = useState("tri");
   const [blendSmooth, setBlendSmooth] = useState(0.5);
   const [stampMode, setStampMode] = useState(false);
+  const [stampBoyut, setStampBoyut] = useState(14);
+  const [stampMerkez, setStampMerkez] = useState(null);
 
-  /* Dönüştür */
   const [sizeU, setSizeU] = useState(2.01);
   const [sizeV, setSizeV] = useState(2.01);
   const [uvLock, setUvLock] = useState(true);
@@ -1306,1401 +1451,1208 @@ export default function Page() {
   const [rotation, setRotation] = useState(0);
   const [rotateSides, setRotateSides] = useState(false);
 
-  /* Maskeleme */
   const [maskBottom, setMaskBottom] = useState(5);
   const [maskTop, setMaskTop] = useState(0);
-  const [maskMode, setMaskMode] = useState<"haric" | "dahil">("haric");
-  const [maskTool, setMaskTool] = useState<"firca" | "doldur" | null>(null);
-  const [brushSize, setBrushSize] = useState(12);
-  const [maskSmooth, setMaskSmooth] = useState(0);
-  const [easing, setEasing] = useState<"dogrusal" | "s" | "yumusak">("dogrusal");
-  const [maskVersion, setMaskVersion] = useState(0);
-  const [maskedCount, setMaskedCount] = useState(0);
-  const [shiftBasili, setShiftBasili] = useState(false);
+  const [maskMode, setMaskMode] = useState("haric");
+  const [easing, setEasing] = useState("dogrusal");
+  const [maskeliVertex, setMaskeliVertex] = useState(0);
 
-  /* Dışa aktarma */
   const [exportRes, setExportRes] = useState(0.35);
-  const [exportStatus, setExportStatus] = useState<"idle" | "working" | "done" | "error">("idle");
+  const [exportStatus, setExportStatus] = useState("idle");
+  const [exportNot, setExportNot] = useState("");
 
-  /* Geometri + maske */
-  const [baseGeometry, setBaseGeometry] = useState<THREE.BufferGeometry>(() => kupGeometrisi());
-  const geoRef = useRef<THREE.BufferGeometry | null>(null);
-  const maskRef = useRef<HTMLCanvasElement | null>(null);
+  const [baseGeometry, setBaseGeometry] = useState(() => kupGeometrisi());
+  const geoRef = useRef(null);
+  const stlRef = useRef(null);
+  const oncekiBase = useRef(null);
+  const sahneRef = useRef(null);
 
-  /* Maske canvas'ı istemcide oluştur */
-  useEffect(() => {
-    const c = document.createElement("canvas");
-    c.width = MASK_SIZE;
-    c.height = MASK_SIZE;
-    const ctx = c.getContext("2d")!;
-    ctx.fillStyle = "#000000";
-    ctx.fillRect(0, 0, MASK_SIZE, MASK_SIZE);
-    maskRef.current = c;
-    setMaskVersion((v) => v + 1);
+  const gecmis = useRef([]);
+  const ileri = useRef([]);
+  const [undoSay, setUndoSay] = useState(0);
+  const [redoSay, setRedoSay] = useState(0);
+  const kilitRef = useRef(false);
+
+  const graf = useMemo(() => (baseGeometry.index ? komsulukKur(baseGeometry) : null), [baseGeometry]);
+  const vertexSayisi = baseGeometry.attributes.position.count;
+  const ucgenSayisi = baseGeometry.index ? Math.round(baseGeometry.index.count / 3) : Math.round(vertexSayisi / 3);
+
+  const opts = useMemo(() => ({
+    amplitude: (invertTexture ? -amplitudeMm : amplitudeMm) * UNIT_PER_MM,
+    invert, symmetric, projection, blendSmooth,
+    maskBottom: (maskBottom * Math.PI) / 180,
+    maskTop: (maskTop * Math.PI) / 180,
+    maskMode, easing, smoothing, geoYumusatma,
+    rotateSides, stampMode, stampMerkez, stampBoyut,
+  }), [amplitudeMm, invert, symmetric, projection, blendSmooth, maskBottom, maskTop, maskMode, easing, smoothing, geoYumusatma, invertTexture, rotateSides, stampMode, stampMerkez, stampBoyut]);
+
+  const aktifKatman = layers.find((l) => l.id === activeLayer) || layers[0];
+  const aktifBolgeObj = bolgeler.find((b) => b.id === aktifBolge) || null;
+  const hedefBolge = arac && aktifBolgeObj ? aktifBolgeObj : null;
+
+  const presetAdi = useCallback((id) => PRESET_MAP[id]?.name || ozelHaritalar.find((o) => o.id === id)?.name || "Katman", [ozelHaritalar]);
+
+  /* ---- Undo / Redo ---- */
+  const anlikGoruntu = useCallback(() => ({
+    layers: layers.map((l) => ({ ...l })),
+    activeLayer,
+    bolgeler: bolgeler.map((b) => ({ ...b, agirlik: b.agirlik ? new Float32Array(b.agirlik) : null })),
+    aktifBolge,
+    maskeAgirlik: maskeAgirlik ? new Float32Array(maskeAgirlik) : null,
+    params: { amplitudeMm, invert, symmetric, smoothing, geoYumusatma, invertTexture, projection, blendSmooth, sizeU, sizeV, offsetU, offsetV, rotation, rotateSides, maskBottom, maskTop, maskMode, easing, color, metalness, roughness, stampBoyut },
+  }), [layers, activeLayer, bolgeler, aktifBolge, maskeAgirlik, amplitudeMm, invert, symmetric, smoothing, geoYumusatma, invertTexture, projection, blendSmooth, sizeU, sizeV, offsetU, offsetV, rotation, rotateSides, maskBottom, maskTop, maskMode, easing, color, metalness, roughness, stampBoyut]);
+
+  const kaydet = useCallback(() => {
+    if (kilitRef.current) return;
+    gecmis.current.push(anlikGoruntu());
+    if (gecmis.current.length > MAX_UNDO) gecmis.current.shift();
+    ileri.current = [];
+    setUndoSay(gecmis.current.length);
+    setRedoSay(0);
+  }, [anlikGoruntu]);
+
+  const uygula = useCallback((s) => {
+    kilitRef.current = true;
+    setLayers(s.layers.map((l) => ({ ...l })));
+    setActiveLayer(s.activeLayer);
+    setBolgeler(s.bolgeler.map((b) => ({ ...b, agirlik: b.agirlik ? new Float32Array(b.agirlik) : null })));
+    setAktifBolge(s.aktifBolge);
+    setMaskeAgirlik(s.maskeAgirlik ? new Float32Array(s.maskeAgirlik) : null);
+    const p = s.params;
+    setAmplitudeMm(p.amplitudeMm); setInvert(p.invert); setSymmetric(p.symmetric);
+    setSmoothing(p.smoothing); setGeoYumusatma(p.geoYumusatma); setInvertTexture(p.invertTexture);
+    setProjection(p.projection); setBlendSmooth(p.blendSmooth);
+    setSizeU(p.sizeU); setSizeV(p.sizeV); setOffsetU(p.offsetU); setOffsetV(p.offsetV);
+    setRotation(p.rotation); setRotateSides(p.rotateSides);
+    setMaskBottom(p.maskBottom); setMaskTop(p.maskTop); setMaskMode(p.maskMode); setEasing(p.easing);
+    setColor(p.color); setMetalness(p.metalness); setRoughness(p.roughness); setStampBoyut(p.stampBoyut);
+    setRenkVersion((v) => v + 1);
+    setTimeout(() => { kilitRef.current = false; }, 90);
   }, []);
 
-  /* Shift takibi */
-  useEffect(() => {
-    const indi = (e: KeyboardEvent) => {
-      if (e.key === "Shift") setShiftBasili(true);
-    };
-    const kalkti = (e: KeyboardEvent) => {
-      if (e.key === "Shift") setShiftBasili(false);
-    };
-    window.addEventListener("keydown", indi);
-    window.addEventListener("keyup", kalkti);
-    return () => {
-      window.removeEventListener("keydown", indi);
-      window.removeEventListener("keyup", kalkti);
-    };
-  }, []);
+  const geriAl = useCallback(() => {
+    if (!gecmis.current.length) return;
+    const s = gecmis.current.pop();
+    ileri.current.push(anlikGoruntu());
+    uygula(s);
+    setUndoSay(gecmis.current.length);
+    setRedoSay(ileri.current.length);
+  }, [anlikGoruntu, uygula]);
 
-  const handleSize = useCallback((s: { x: number; y: number; z: number }) => {
-    setSizeMm({ x: s.x * MM_PER_UNIT, y: s.y * MM_PER_UNIT, z: s.z * MM_PER_UNIT });
-  }, []);
+  const ileriAl = useCallback(() => {
+    if (!ileri.current.length) return;
+    const s = ileri.current.pop();
+    gecmis.current.push(anlikGoruntu());
+    uygula(s);
+    setUndoSay(gecmis.current.length);
+    setRedoSay(ileri.current.length);
+  }, [anlikGoruntu, uygula]);
 
-  /* Thumbnail üretimi */
   useEffect(() => {
-    let durdur = false;
+    const h = (e) => {
+      const t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) ileriAl(); else geriAl();
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [geriAl, ileriAl]);
+
+  /* ---- Geometri ömrü ---- */
+  useEffect(() => {
+    const p = oncekiBase.current;
+    oncekiBase.current = baseGeometry;
+    if (p && p !== baseGeometry && p !== stlRef.current) p.dispose();
+    setBolgeler((bs) => bs.map((b) => ({ ...b, agirlik: new Float32Array(baseGeometry.attributes.position.count) })));
+    setMaskeAgirlik(new Float32Array(baseGeometry.attributes.position.count));
+    setMaskeliVertex(0);
+  }, [baseGeometry]);
+
+  /* ---- Thumbnail ---- */
+  useEffect(() => {
+    let dur = false;
     const idler = Object.keys(PRESET_MAP);
     let i = 0;
     const parca = () => {
-      if (durdur) return;
-      const son = Math.min(i + 8, idler.length);
-      const yeni: Record<string, string> = {};
+      if (dur) return;
+      const son = Math.min(i + 6, idler.length);
+      const yeni = {};
       for (; i < son; i++) {
         const id = idler[i];
         if (!THUMB_CACHE.has(id)) THUMB_CACHE.set(id, makeThumbCanvas(id).toDataURL("image/png"));
-        yeni[id] = THUMB_CACHE.get(id)!;
+        yeni[id] = THUMB_CACHE.get(id);
       }
       setThumbs((t) => ({ ...t, ...yeni }));
       if (i < idler.length) setTimeout(parca, 0);
     };
     parca();
-    return () => {
-      durdur = true;
-    };
+    return () => { dur = true; };
   }, []);
 
-  /* Aktif katman */
-  const aktifKatman = layers.find((l) => l.id === activeLayer) || layers[0];
+  const handleSize = useCallback((s) => {
+    setSizeMm({ x: s.x * MM_PER_UNIT, y: s.y * MM_PER_UNIT, z: s.z * MM_PER_UNIT });
+  }, []);
 
-  /* Preset adı çözücü (özel haritalar dahil) */
-  const presetAdi = useCallback(
-    (id: string) =>
-      PRESET_MAP[id]?.name || ozelHaritalar.find((o) => o.id === id)?.name || "Katman",
-    [ozelHaritalar]
-  );
-
-  /* Displacement seçenekleri (memo) */
-  const opts = useMemo(
-    () => ({
-      amplitude: (invertTexture ? -amplitudeMm : amplitudeMm) * UNIT_PER_MM,
-      invert,
-      symmetric,
-      projection,
-      blendSmooth,
-      maskBottom: (maskBottom * Math.PI) / 180,
-      maskTop: (maskTop * Math.PI) / 180,
-      maskMode,
-      easing,
-      smoothing,
-      maskSmooth,
-      geoYumusatma,
-    }),
-    [
-      amplitudeMm,
-      invert,
-      symmetric,
-      projection,
-      blendSmooth,
-      maskBottom,
-      maskTop,
-      maskMode,
-      easing,
-      smoothing,
-      maskSmooth,
-      invertTexture,
-      geoYumusatma,
-    ]
-  );
-
-  /* Aktif katman değişince dönüşüm değerlerini o katmandan yükle */
-  const oncekiKatmanRef = useRef<string>("");
+  /* ---- Katman dönüşüm senkronu ---- */
+  const oncekiKatman = useRef("");
   useEffect(() => {
-    if (oncekiKatmanRef.current === activeLayer) return;
+    if (oncekiKatman.current === activeLayer) return;
     const l = layers.find((x) => x.id === activeLayer);
     if (!l) return;
-    oncekiKatmanRef.current = activeLayer;
+    oncekiKatman.current = activeLayer;
+    kilitRef.current = true;
     setSizeU(50 / Math.max(0.1, l.scaleU));
     setSizeV(50 / Math.max(0.1, l.scaleV));
     setOffsetU(l.offsetU * 50);
     setOffsetV(l.offsetV * 50);
     setRotation(l.rotation);
+    setTimeout(() => { kilitRef.current = false; }, 90);
   }, [activeLayer, layers]);
 
-  /* Dönüşüm değerlerini yalnızca aktif katmana yaz */
   useEffect(() => {
-    if (!aktifKatman) return;
+    if (!aktifKatman || kilitRef.current) return;
     const su = 50 / Math.max(0.1, sizeU);
     const sv = 50 / Math.max(0.1, sizeV);
-    setLayers((ls) =>
-      ls.map((l) =>
-        l.id === aktifKatman.id
-          ? { ...l, scaleU: su, scaleV: sv, offsetU: offsetU / 50, offsetV: offsetV / 50, rotation }
-          : l
-      )
-    );
+    setLayers((ls) => ls.map((l) => (l.id === aktifKatman.id ? { ...l, scaleU: su, scaleV: sv, offsetU: offsetU / 50, offsetV: offsetV / 50, rotation } : l)));
   }, [sizeU, sizeV, offsetU, offsetV, rotation, activeLayer]);
 
-  const presetSec = useCallback(
-    (presetId: string) => {
-      setLayers((ls) => ls.map((l) => (l.id === activeLayer ? { ...l, presetId } : l)));
-    },
-    [activeLayer]
-  );
+  const presetSec = useCallback((id) => {
+    kaydet();
+    if (arac && aktifBolge) {
+      setBolgeler((bs) => bs.map((b) => (b.id === aktifBolge ? { ...b, presetId: id } : b)));
+    } else {
+      setLayers((ls) => ls.map((l) => (l.id === activeLayer ? { ...l, presetId: id } : l)));
+    }
+  }, [activeLayer, arac, aktifBolge, kaydet]);
 
-  /* Katman yönetimi */
   const katmanEkle = useCallback(() => {
+    kaydet();
     setLayers((ls) => {
       if (ls.length >= MAX_LAYERS) return ls;
-      let sayac = ls.length + 1;
-      while (ls.some((l) => l.id === `kat${sayac}`)) sayac++;
-      const id = `kat${sayac}`;
-      const su = 50 / Math.max(0.1, sizeU);
-      const sv = 50 / Math.max(0.1, sizeV);
+      let s = ls.length + 1;
+      while (ls.some((l) => l.id === `kat${s}`)) s++;
+      const id = `kat${s}`;
       setActiveLayer(id);
-      return [
-        ...ls,
-        {
-          id,
-          presetId: "gurultu",
-          blend: "ort",
-          depth: 0.6,
-          visible: true,
-          scaleU: su,
-          scaleV: sv,
-          offsetU: offsetU / 50,
-          offsetV: offsetV / 50,
-          rotation,
-        },
-      ];
+      return [...ls, { id, presetId: "gurultu", blend: "ort", depth: 0.6, visible: true, scaleU: 50 / Math.max(0.1, sizeU), scaleV: 50 / Math.max(0.1, sizeV), offsetU: offsetU / 50, offsetV: offsetV / 50, rotation }];
     });
-  }, [sizeU, sizeV, offsetU, offsetV, rotation]);
+  }, [sizeU, sizeV, offsetU, offsetV, rotation, kaydet]);
 
-  const katmanSil = useCallback(
-    (id: string) => {
-      setLayers((ls) => {
-        if (ls.length === 1) return ls;
-        const kalan = ls.filter((l) => l.id !== id);
-        if (id === activeLayer) setActiveLayer(kalan[0].id);
-        return kalan;
-      });
-    },
-    [activeLayer]
-  );
+  const katmanSil = useCallback((id) => {
+    kaydet();
+    setLayers((ls) => {
+      if (ls.length === 1) return ls;
+      const kalan = ls.filter((l) => l.id !== id);
+      if (id === activeLayer) setActiveLayer(kalan[0].id);
+      return kalan;
+    });
+  }, [activeLayer, kaydet]);
 
-  const katmanTasi = useCallback((id: string, yon: -1 | 1) => {
+  const katmanTasi = useCallback((id, yon) => {
+    kaydet();
     setLayers((ls) => {
       const i = ls.findIndex((l) => l.id === id);
-      if (i < 0) return ls;
       const j = i + yon;
-      if (j < 0 || j >= ls.length) return ls;
-      const kopya = [...ls];
-      const gecici = kopya[i];
-      kopya[i] = kopya[j];
-      kopya[j] = gecici;
-      return kopya;
+      if (i < 0 || j < 0 || j >= ls.length) return ls;
+      const k = [...ls];
+      [k[i], k[j]] = [k[j], k[i]];
+      return k;
     });
-  }, []);
+  }, [kaydet]);
 
-  const katmanKopyala = useCallback((id: string) => {
+  const katmanKopyala = useCallback((id) => {
+    kaydet();
     setLayers((ls) => {
       if (ls.length >= MAX_LAYERS) return ls;
-      const kaynak = ls.find((l) => l.id === id);
-      if (!kaynak) return ls;
-      let sayac = ls.length + 1;
-      while (ls.some((l) => l.id === `kat${sayac}`)) sayac++;
-      const yeniId = `kat${sayac}`;
-      setActiveLayer(yeniId);
-      return [...ls, { ...kaynak, id: yeniId }];
+      const k = ls.find((l) => l.id === id);
+      if (!k) return ls;
+      let s = ls.length + 1;
+      while (ls.some((l) => l.id === `kat${s}`)) s++;
+      const yeni = `kat${s}`;
+      setActiveLayer(yeni);
+      return [...ls, { ...k, id: yeni }];
     });
-  }, []);
+  }, [kaydet]);
 
-  const katmanDerinlik = useCallback((id: string, deger: number) => {
-    setLayers((ls) =>
-      ls.map((l) => (l.id === id ? { ...l, depth: Math.max(0, Math.min(2, deger)) } : l))
-    );
-  }, []);
-
-  const katmanGorunurluk = useCallback((id: string) => {
-    setLayers((ls) => ls.map((l) => (l.id === id ? { ...l, visible: !l.visible } : l)));
-  }, []);
-
-  const tumGorunurluk = useCallback((deger: boolean) => {
-    setLayers((ls) => ls.map((l) => ({ ...l, visible: deger })));
-  }, []);
-
-  /* Özel harita yükleme */
-  const ozelHaritaYukle = useCallback(
-    async (file: File) => {
-      if (!file.type.startsWith("image/")) {
-        setYuklemeDurum("Yalnızca PNG / JPG / WEBP yükleyin.");
-        setTimeout(() => setYuklemeDurum(""), 2600);
-        return;
-      }
-      try {
-        const okunan = await gorselOku(file);
-        ozelSayac.current += 1;
-        const id = `ozel_${ozelSayac.current}`;
-
-        const canvas = document.createElement("canvas");
-        canvas.width = TEX_SIZE;
-        canvas.height = TEX_SIZE;
-        const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
-        fillBg(ctx, TEX_SIZE, "#000000");
-        const oran = Math.max(TEX_SIZE / okunan.w, TEX_SIZE / okunan.h);
-        const w = okunan.w * oran;
-        const h = okunan.h * oran;
-        ctx.drawImage(okunan.kaynak, (TEX_SIZE - w) / 2, (TEX_SIZE - h) / 2, w, h);
-
-        CUSTOM_MAPS.set(id, canvas);
-        TEX_CACHE.delete(id);
-        THUMB_CACHE.set(id, makeThumbCanvas(id).toDataURL("image/png"));
-
-        const ad =
-          file.name.replace(/\.[^.]+$/, "").slice(0, 40).trim() || `Özel harita ${ozelSayac.current}`;
-
-        setOzelHaritalar((m) => [...m, { id, name: ad }]);
-        setThumbs((t) => ({ ...t, [id]: THUMB_CACHE.get(id)! }));
-        setLayers((ls) => ls.map((l) => (l.id === activeLayer ? { ...l, presetId: id } : l)));
-        setCategory("ozel");
-        setArama("");
-        setYuklemeDurum(`"${ad}" galeriye eklendi.`);
-        setTimeout(() => setYuklemeDurum(""), 2600);
-      } catch {
-        setYuklemeDurum("Görsel okunamadı, tekrar deneyin.");
-        setTimeout(() => setYuklemeDurum(""), 2600);
-      }
-    },
-    [activeLayer]
-  );
-
-  const ozelHaritaSil = useCallback((id: string) => {
-    CUSTOM_MAPS.delete(id);
-    TEX_CACHE.delete(id);
-    THUMB_CACHE.delete(id);
-    setOzelHaritalar((m) => m.filter((o) => o.id !== id));
-    setThumbs((t) => {
-      const kopya = { ...t };
-      delete kopya[id];
-      return kopya;
+  /* ---- Bölge yönetimi ---- */
+  const bolgeEkle = useCallback(() => {
+    kaydet();
+    setBolgeler((bs) => {
+      if (bs.length >= MAX_BOLGE) return bs;
+      let s = bs.length + 1;
+      while (bs.some((b) => b.id === `blg${s}`)) s++;
+      const id = `blg${s}`;
+      setAktifBolge(id);
+      setArac("kalem");
+      return [...bs, {
+        id, ad: `Bölge ${s}`, renk: BOLGE_RENKLERI[(s - 1) % BOLGE_RENKLERI.length],
+        agirlik: new Float32Array(vertexSayisi), presetId: aktifKatman?.presetId || "kristal",
+        derinlik: 2.5, olcekU: 50 / Math.max(0.1, sizeU), olcekV: 50 / Math.max(0.1, sizeV),
+        offsetU: 0, offsetV: 0, rotasyon: 0, blend: "maks", gorunur: true,
+      }];
     });
-    setLayers((ls) => ls.map((l) => (l.presetId === id ? { ...l, presetId: "gurultu" } : l)));
+  }, [vertexSayisi, aktifKatman, sizeU, sizeV, kaydet]);
+
+  const bolgeSil = useCallback((id) => {
+    kaydet();
+    setBolgeler((bs) => bs.filter((b) => b.id !== id));
+    setAktifBolge((a) => (a === id ? null : a));
+  }, [kaydet]);
+
+  const bolgeTemizle = useCallback(() => {
+    kaydet();
+    setBolgeler([]);
+    setAktifBolge(null);
+    setArac(null);
+  }, [kaydet]);
+
+  const bolgeGuncelle = useCallback((id, alan, deger) => {
+    setBolgeler((bs) => bs.map((b) => (b.id === id ? { ...b, [alan]: deger } : b)));
   }, []);
 
-  /* STL yükleme */
-  const handleFile = useCallback((file: File) => {
+  /* ---- Sahne etkileşimi: kalem / lasso / silgi / seç / damga / maske ---- */
+  const onHit = useCallback((h) => {
+    if (stampMode && !arac && !maskeArac) {
+      setStampMerkez({ x: h.point.x, y: h.point.y, z: h.point.z, nx: h.normal.x, ny: h.normal.y, nz: h.normal.z });
+      return;
+    }
+    if (!graf) return;
+    const yaricap = Math.max(0.02, fircaMm * UNIT_PER_MM);
+    const feather = Math.max(0.01, featherMm * UNIT_PER_MM);
+
+    if (maskeArac) {
+      const r = kalemUygula(graf, h.faceIndex, yaricap, feather, maskeAgirlik || new Float32Array(vertexSayisi), false);
+      const yeni = agirlikYaz(graf, maskeAgirlik || new Float32Array(vertexSayisi), r.dokunulan, r.mesafe, r.yaricap, r.f, false);
+      setMaskeAgirlik(yeni);
+      let c = 0;
+      for (let i = 0; i < yeni.length; i++) if (yeni[i] > 0.05) c++;
+      setMaskeliVertex(c);
+      return;
+    }
+
+    if (!arac) return;
+
+    if (arac === "sec") {
+      let en = null, enW = 0;
+      for (const b of bolgeler) {
+        if (!b.agirlik) continue;
+        const list = graf.vertUcgen;
+        void list;
+        const t = h.faceIndex;
+        void t;
+        let w = 0;
+        const idx = baseGeometry.index;
+        for (let k = 0; k < 3; k++) {
+          const vi = idx.getX(h.faceIndex * 3 + k);
+          w = Math.max(w, b.agirlik[vi] || 0);
+        }
+        if (w > enW) { enW = w; en = b.id; }
+      }
+      if (en && enW > 0.05) setAktifBolge(en);
+      return;
+    }
+
+    if (arac === "lasso") return;
+
+    if (!aktifBolgeObj) return;
+    const hedef = aktifBolgeObj.agirlik || new Float32Array(vertexSayisi);
+    const r = kalemUygula(graf, h.faceIndex, yaricap, feather, hedef, arac === "silgi");
+    const yeni = agirlikYaz(graf, hedef, r.dokunulan, r.mesafe, r.yaricap, r.f, arac === "silgi");
+    setBolgeler((bs) => bs.map((b) => (b.id === aktifBolgeObj.id ? { ...b, agirlik: yeni } : b)));
+    setRenkVersion((v) => v + 1);
+  }, [graf, fircaMm, featherMm, maskeArac, maskeAgirlik, vertexSayisi, arac, bolgeler, aktifBolgeObj, stampMode, baseGeometry]);
+
+  /* ---- Lasso overlay ---- */
+  const lassoBasla = (e) => {
+    if (arac !== "lasso") return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const r = e.currentTarget.getBoundingClientRect();
+    lassoRef.current = [[e.clientX - r.left, e.clientY - r.top]];
+    setLassoNokta([...lassoRef.current]);
+  };
+  const lassoSurdur = (e) => {
+    if (arac !== "lasso" || !lassoRef.current.length) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    lassoRef.current.push([e.clientX - r.left, e.clientY - r.top]);
+    setLassoNokta([...lassoRef.current]);
+  };
+  const lassoBitir = () => {
+    if (arac !== "lasso") return;
+    const poly = lassoRef.current;
+    lassoRef.current = [];
+    setLassoNokta([]);
+    if (poly.length < 6 || !graf || !sahneRef.current) return;
+    kaydet();
+    const { camera, width, height } = sahneRef.current;
+    const w = lassoUygula(graf, baseGeometry, camera, width, height, poly, Math.max(0.01, featherMm * UNIT_PER_MM));
+    if (aktifBolgeObj) {
+      setBolgeler((bs) => bs.map((b) => (b.id === aktifBolgeObj.id ? { ...b, agirlik: w } : b)));
+    } else {
+      setBolgeler((bs) => {
+        if (bs.length >= MAX_BOLGE) return bs;
+        let s = bs.length + 1;
+        while (bs.some((b) => b.id === `blg${s}`)) s++;
+        const id = `blg${s}`;
+        setAktifBolge(id);
+        return [...bs, {
+          id, ad: `Bölge ${s}`, renk: BOLGE_RENKLERI[(s - 1) % BOLGE_RENKLERI.length],
+          agirlik: w, presetId: aktifKatman?.presetId || "kristal", derinlik: 2.5,
+          olcekU: 50 / Math.max(0.1, sizeU), olcekV: 50 / Math.max(0.1, sizeV),
+          offsetU: 0, offsetV: 0, rotasyon: 0, blend: "maks", gorunur: true,
+        }];
+      });
+    }
+    setRenkVersion((v) => v + 1);
+  };
+
+  function SahneKopru() {
+    const { camera, size } = useThree();
+    useEffect(() => { sahneRef.current = { camera, width: size.width, height: size.height }; }, [camera, size]);
+    return null;
+  }
+
+  /* ---- Dosya yükleme ---- */
+  const handleFile = useCallback((file) => {
     if (!file.name.toLocaleLowerCase("tr-TR").endsWith(".stl")) {
-      setExportStatus("error");
-      setTimeout(() => setExportStatus("idle"), 2500);
+      setExportStatus("error"); setExportNot("Yalnızca .stl dosyası");
+      setTimeout(() => { setExportStatus("idle"); setExportNot(""); }, 2600);
       return;
     }
     if (file.size > MAX_STL_MB * 1024 * 1024) {
-      setExportStatus("error");
-      setTimeout(() => setExportStatus("idle"), 2500);
+      setExportStatus("error"); setExportNot(`En fazla ${MAX_STL_MB} MB`);
+      setTimeout(() => { setExportStatus("idle"); setExportNot(""); }, 2600);
       return;
     }
     setExportStatus("working");
-    const okuyucu = new FileReader();
-    okuyucu.onload = () => {
+    const ok = new FileReader();
+    ok.onload = () => {
       try {
-        const tampon = okuyucu.result as ArrayBuffer;
-        const geo = normalizeGeometry(new STLLoader().parse(tampon));
+        const geo = normalizeGeometry(new STLLoader().parse(ok.result));
+        if (stlRef.current && stlRef.current !== geo) stlRef.current.dispose();
+        stlRef.current = geo;
+        kaydet();
         setBaseGeometry(geo);
         setFileName(file.name);
         setFileSizeKB(Math.max(1, Math.round(file.size / 1024)));
         setMode("stl");
         setExportStatus("idle");
       } catch {
-        setExportStatus("error");
-        setTimeout(() => setExportStatus("idle"), 2500);
+        setExportStatus("error"); setExportNot("Dosya okunamadı");
+        setTimeout(() => { setExportStatus("idle"); setExportNot(""); }, 2600);
       }
     };
-    okuyucu.onerror = () => {
-      setExportStatus("error");
-      setTimeout(() => setExportStatus("idle"), 2500);
-    };
-    okuyucu.readAsArrayBuffer(file);
-  }, []);
+    ok.onerror = () => { setExportStatus("error"); setTimeout(() => setExportStatus("idle"), 2600); };
+    ok.readAsArrayBuffer(file);
+  }, [kaydet]);
 
   const kubeDon = useCallback(() => {
+    kaydet();
     setBaseGeometry(kupGeometrisi());
-    setMode("kup");
-    setFileName("");
-    setFileSizeKB(0);
+    setMode("kup"); setFileName(""); setFileSizeKB(0);
+  }, [kaydet]);
+
+  const stlDon = useCallback(() => {
+    if (!stlRef.current) return;
+    kaydet();
+    setBaseGeometry(stlRef.current);
+    setMode("stl");
+  }, [kaydet]);
+
+  /* ---- Özel harita ---- */
+  const ozelHaritaYukle = useCallback(async (file) => {
+    if (!file.type.startsWith("image/")) {
+      setYuklemeDurum("Yalnızca PNG / JPG / WEBP yükleyin.");
+      setTimeout(() => setYuklemeDurum(""), 2600);
+      return;
+    }
+    try {
+      const o = await gorselOku(file);
+      ozelSayac.current += 1;
+      const id = `ozel_${ozelSayac.current}`;
+      const canvas = document.createElement("canvas");
+      canvas.width = TEX_SIZE; canvas.height = TEX_SIZE;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      fillBg(ctx, TEX_SIZE, "#000000");
+      const oran = Math.max(TEX_SIZE / o.w, TEX_SIZE / o.h);
+      const w = o.w * oran, h = o.h * oran;
+      ctx.drawImage(o.kaynak, (TEX_SIZE - w) / 2, (TEX_SIZE - h) / 2, w, h);
+      CUSTOM_MAPS.set(id, canvas);
+      TEX_CACHE.delete(id);
+      THUMB_CACHE.set(id, makeThumbCanvas(id).toDataURL("image/png"));
+      const ad = file.name.replace(/\.[^.]+$/, "").slice(0, 40).trim() || `Özel harita ${ozelSayac.current}`;
+      setOzelHaritalar((m) => [...m, { id, name: ad }]);
+      setThumbs((t) => ({ ...t, [id]: THUMB_CACHE.get(id) }));
+      kaydet();
+      if (arac && aktifBolge) setBolgeler((bs) => bs.map((b) => (b.id === aktifBolge ? { ...b, presetId: id } : b)));
+      else setLayers((ls) => ls.map((l) => (l.id === activeLayer ? { ...l, presetId: id } : l)));
+      setCategory("ozel"); setArama("");
+      setYuklemeDurum(`"${ad}" galeriye eklendi.`);
+      setTimeout(() => setYuklemeDurum(""), 2600);
+    } catch {
+      setYuklemeDurum("Görsel okunamadı, tekrar deneyin.");
+      setTimeout(() => setYuklemeDurum(""), 2600);
+    }
+  }, [activeLayer, arac, aktifBolge, kaydet]);
+
+  const ozelHaritaSil = useCallback((id) => {
+    CUSTOM_MAPS.delete(id); TEX_CACHE.delete(id); THUMB_CACHE.delete(id);
+    setOzelHaritalar((m) => m.filter((o) => o.id !== id));
+    setThumbs((t) => { const k = { ...t }; delete k[id]; return k; });
+    setLayers((ls) => ls.map((l) => (l.presetId === id ? { ...l, presetId: "gurultu" } : l)));
+    setBolgeler((bs) => bs.map((b) => (b.presetId === id ? { ...b, presetId: "gurultu" } : b)));
   }, []);
 
-  /* Fırça ile maske boyama */
-  const maskeBoyan = useCallback(
-    (u: number, v: number) => {
-      const c = maskRef.current;
-      if (!c) return;
-      const ctx = c.getContext("2d")!;
-      const x = u * MASK_SIZE;
-      const y = (1 - v) * MASK_SIZE;
-      const r = brushSize / 2;
-      ctx.globalCompositeOperation = shiftBasili ? "destination-out" : "source-over";
-      const g = ctx.createRadialGradient(x, y, 0, x, y, Math.max(2, r * 2));
-      g.addColorStop(0, "#ffffff");
-      g.addColorStop(0.6, "#ffffff");
-      g.addColorStop(1, "rgba(255,255,255,0)");
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(x, y, Math.max(2, r * 2), 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalCompositeOperation = "source-over";
-      setMaskedCount((n) => n + 1);
-      setMaskVersion((ver) => ver + 1);
-    },
-    [brushSize, shiftBasili]
-  );
+  /* ---- Maske ---- */
+  const maskeTemizle = useCallback(() => {
+    kaydet();
+    setMaskeAgirlik(new Float32Array(vertexSayisi));
+    setMaskeliVertex(0);
+  }, [vertexSayisi, kaydet]);
 
-  const maskeyiTemizle = useCallback(() => {
-    const c = maskRef.current;
-    if (!c) return;
-    const ctx = c.getContext("2d")!;
-    ctx.clearRect(0, 0, MASK_SIZE, MASK_SIZE);
-    ctx.fillStyle = "#000000";
-    ctx.fillRect(0, 0, MASK_SIZE, MASK_SIZE);
-    setMaskedCount(0);
-    setMaskVersion((v) => v + 1);
-  }, []);
+  const maskeDoldur = useCallback(() => {
+    kaydet();
+    const a = new Float32Array(vertexSayisi).fill(1);
+    setMaskeAgirlik(a);
+    setMaskeliVertex(vertexSayisi);
+  }, [vertexSayisi, kaydet]);
 
-  /* Doldur: tüm yüzeyi maskele */
-  const doldur = useCallback(() => {
-    const c = maskRef.current;
-    if (!c) return;
-    const ctx = c.getContext("2d")!;
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, MASK_SIZE, MASK_SIZE);
-    setMaskedCount(1);
-    setMaskVersion((v) => v + 1);
-  }, []);
+  /* ---- Sıfırla / Rastgele ---- */
+  const sifirla = useCallback(() => {
+    kaydet();
+    setAmplitudeMm(1.22); setInvert(false); setSymmetric(false); setSmoothing(0); setGeoYumusatma(0);
+    setInvertTexture(false); setProjection("tri"); setBlendSmooth(0.5);
+    setSizeU(2.01); setSizeV(2.01); setOffsetU(0); setOffsetV(0); setRotation(0); setRotateSides(false);
+    setMaskBottom(5); setMaskTop(0); setMaskMode("haric"); setEasing("dogrusal");
+    setColor(DEFAULT_COLOR); setMetalness(DEFAULT_METALNESS); setRoughness(DEFAULT_ROUGHNESS);
+    setStampMode(false); setStampMerkez(null); setStampBoyut(14);
+    setKesitY(0); setExportRes(0.35);
+    setMaskeAgirlik(new Float32Array(vertexSayisi)); setMaskeliVertex(0);
+    setLayers([{ id: "kat1", presetId: "kristal", blend: "ekle", depth: 1, visible: true, scaleU: 1, scaleV: 1, offsetU: 0, offsetV: 0, rotation: 0 }]);
+    setActiveLayer("kat1");
+    setBolgeler([]); setAktifBolge(null); setArac(null); setMaskeArac(false);
+  }, [vertexSayisi, kaydet]);
 
-  /* STL dışa aktarma */
+  const rastgele = useCallback(() => {
+    kaydet();
+    const rnd = mulberry32((Date.now() & 0xffff) + 17);
+    const p = PRESETS[Math.floor(rnd() * PRESETS.length)];
+    setLayers((ls) => ls.map((l) => (l.id === activeLayer ? { ...l, presetId: p.id, depth: 0.6 + rnd() * 1.2 } : l)));
+    setAmplitudeMm(0.6 + rnd() * 2.4);
+    setSizeU(1 + rnd() * 8); setSizeV(1 + rnd() * 8);
+    setRotation(Math.floor(rnd() * 360));
+    setSmoothing(rnd() * 0.3);
+    setProjection(["uv", "tri", "kutu", "kuresel"][Math.floor(rnd() * 4)]);
+    setColor(QUICK_COLORS[Math.floor(rnd() * QUICK_COLORS.length)]);
+  }, [activeLayer, kaydet]);
+
+  /* ---- Proje kaydet / aç ---- */
+  const projeKaydet = useCallback(() => {
+    try {
+      const veri = {
+        surum: 2,
+        layers, activeLayer,
+        bolgeler: bolgeler.map((b) => ({ ...b, agirlik: agirlikPaketle(b.agirlik) })),
+        aktifBolge,
+        maske: agirlikPaketle(maskeAgirlik),
+        vertexSayisi,
+        ozelHaritalar: ozelHaritalar.map((o) => ({ id: o.id, name: o.name, data: CUSTOM_MAPS.get(o.id)?.toDataURL("image/png") || null })),
+        params: { amplitudeMm, invert, symmetric, smoothing, geoYumusatma, invertTexture, projection, blendSmooth, sizeU, sizeV, offsetU, offsetV, rotation, rotateSides, maskBottom, maskTop, maskMode, easing, color, metalness, roughness, stampBoyut, exportRes, kesitY },
+        dosya: fileName || null,
+      };
+      const blob = new Blob([JSON.stringify(veri)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const t = new Date();
+      const damga = `${t.getFullYear()}${String(t.getMonth() + 1).padStart(2, "0")}${String(t.getDate()).padStart(2, "0")}_${String(t.getHours()).padStart(2, "0")}${String(t.getMinutes()).padStart(2, "0")}`;
+      a.href = url; a.download = `palamut_proje_${damga}.palamut`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setExportNot("Proje kaydedildi");
+      setTimeout(() => setExportNot(""), 2400);
+    } catch {
+      setExportNot("Proje kaydedilemedi");
+      setTimeout(() => setExportNot(""), 2400);
+    }
+  }, [layers, activeLayer, bolgeler, aktifBolge, maskeAgirlik, vertexSayisi, ozelHaritalar, amplitudeMm, invert, symmetric, smoothing, geoYumusatma, invertTexture, projection, blendSmooth, sizeU, sizeV, offsetU, offsetV, rotation, rotateSides, maskBottom, maskTop, maskMode, easing, color, metalness, roughness, stampBoyut, exportRes, kesitY, fileName]);
+
+  const projeAc = useCallback(async (file) => {
+    try {
+      const metin = await file.text();
+      const v = JSON.parse(metin);
+      if (!v || v.surum !== 2 || !Array.isArray(v.layers)) throw new Error("gecersiz");
+      kaydet();
+      for (const o of v.ozelHaritalar || []) {
+        if (!o.data) continue;
+        const img = await dataUrlYukle(o.data);
+        const c = document.createElement("canvas");
+        c.width = TEX_SIZE; c.height = TEX_SIZE;
+        const cx = c.getContext("2d", { willReadFrequently: true });
+        cx.drawImage(img, 0, 0, TEX_SIZE, TEX_SIZE);
+        CUSTOM_MAPS.set(o.id, c);
+        TEX_CACHE.delete(o.id);
+        THUMB_CACHE.set(o.id, makeThumbCanvas(o.id).toDataURL("image/png"));
+        setThumbs((t) => ({ ...t, [o.id]: THUMB_CACHE.get(o.id) }));
+      }
+      setOzelHaritalar((v.ozelHaritalar || []).map((o) => ({ id: o.id, name: o.name })));
+      const n = vertexSayisi;
+      setLayers(v.layers);
+      setActiveLayer(v.activeLayer);
+      setBolgeler((v.bolgeler || []).map((b) => ({ ...b, agirlik: agirlikAc(b.agirlik, n) })));
+      setAktifBolge(v.aktifBolge || null);
+      setMaskeAgirlik(agirlikAc(v.maske, n));
+      const p = v.params || {};
+      setAmplitudeMm(p.amplitudeMm ?? 1.22); setInvert(!!p.invert); setSymmetric(!!p.symmetric);
+      setSmoothing(p.smoothing ?? 0); setGeoYumusatma(p.geoYumusatma ?? 0); setInvertTexture(!!p.invertTexture);
+      setProjection(p.projection ?? "tri"); setBlendSmooth(p.blendSmooth ?? 0.5);
+      setSizeU(p.sizeU ?? 2.01); setSizeV(p.sizeV ?? 2.01); setOffsetU(p.offsetU ?? 0); setOffsetV(p.offsetV ?? 0);
+      setRotation(p.rotation ?? 0); setRotateSides(!!p.rotateSides);
+      setMaskBottom(p.maskBottom ?? 5); setMaskTop(p.maskTop ?? 0); setMaskMode(p.maskMode ?? "haric"); setEasing(p.easing ?? "dogrusal");
+      setColor(p.color ?? DEFAULT_COLOR); setMetalness(p.metalness ?? DEFAULT_METALNESS); setRoughness(p.roughness ?? DEFAULT_ROUGHNESS);
+      setStampBoyut(p.stampBoyut ?? 14); setExportRes(p.exportRes ?? 0.35); setKesitY(p.kesitY ?? 0);
+      setRenkVersion((x) => x + 1);
+      setExportNot(v.dosya ? `Proje açıldı · kaynak dosya: ${v.dosya}` : "Proje açıldı");
+      setTimeout(() => setExportNot(""), 3600);
+    } catch {
+      setExportNot("Geçersiz proje dosyası");
+      setTimeout(() => setExportNot(""), 2600);
+    }
+  }, [vertexSayisi, kaydet]);
+
+  /* ---- Export ---- */
+  const exportHazirla = useCallback(() => {
+    const temel = yenidenOrnekle(baseGeometry, exportRes);
+    const gecerli = layers.filter((l) => l.visible).map((l) => ({
+      data: getTexData(l.presetId).data, blend: l.blend, depth: l.depth,
+      scaleU: l.scaleU, scaleV: l.scaleV, offsetU: l.offsetU, offsetV: l.offsetV, rotation: l.rotation,
+    }));
+    const n = temel.attributes.position.count;
+    const olcekle = (a) => {
+      if (!a) return null;
+      if (a.length === n) return a;
+      const out = new Float32Array(n);
+      for (let i = 0; i < n; i++) out[i] = a[Math.min(a.length - 1, Math.floor((i / n) * a.length))] || 0;
+      return out;
+    };
+    const bg = bolgeler.map((b) => ({ ...b, agirlik: olcekle(b.agirlik) }));
+    const mk = olcekle(maskeAgirlik);
+    const g = preview3D ? applyRealDisplacement(temel, gecerli, bg, mk, opts) : temel;
+    if (g !== temel) temel.dispose();
+    return g;
+  }, [baseGeometry, exportRes, layers, bolgeler, maskeAgirlik, opts, preview3D]);
+
   const stlIndir = useCallback(() => {
-    const geo = geoRef.current;
-    if (!geo) return;
     setExportStatus("working");
     setTimeout(() => {
       try {
-        const mesh = new THREE.Mesh(geo);
-        const buffer = new STLExporter().parse(mesh, { binary: true });
+        const g = exportHazirla();
+        const kontrol = manifoldDenetle(g);
+        const buffer = new STLExporter().parse(new THREE.Mesh(g), { binary: true });
         const blob = new Blob([buffer], { type: "application/octet-stream" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
-        a.href = url;
-        a.download = `palamut3d_${Date.now()}.stl`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+        a.href = url; a.download = `palamut3d_${Date.now()}.stl`;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
         URL.revokeObjectURL(url);
+        const t = g.index ? Math.round(g.index.count / 3) : Math.round(g.attributes.position.count / 3);
+        setExportNot(`${t.toLocaleString("tr-TR")} üçgen · ${kontrol.sinir === 0 && kontrol.nonManifold === 0 ? "kapalı katı" : `${kontrol.sinir} sınır kenar`}`);
+        g.dispose();
         setExportStatus("done");
-        setTimeout(() => setExportStatus("idle"), 2200);
+        setTimeout(() => { setExportStatus("idle"); setExportNot(""); }, 4200);
       } catch {
-        setExportStatus("error");
-        setTimeout(() => setExportStatus("idle"), 2200);
+        setExportStatus("error"); setExportNot("Dışa aktarma başarısız");
+        setTimeout(() => { setExportStatus("idle"); setExportNot(""); }, 2600);
       }
     }, 40);
-  }, []);
+  }, [exportHazirla]);
 
-  /* 3MF dışa aktarma */
-  const handle3MFExport = useCallback(() => {
-    const geo = geoRef.current;
-    if (!geo) return;
+  const mfIndir = useCallback(() => {
     setExportStatus("working");
     setTimeout(() => {
       void (async () => {
         try {
-          const modelXml = ucgenXmlKur(geo);
+          const g = exportHazirla();
+          const xml = ucgenXmlKur(g);
           const zip = new JSZip();
           zip.file("[Content_Types].xml", CONTENT_TYPES_XML);
           zip.file("_rels/.rels", RELS_XML);
-          zip.file("3D/3dmodel.model", modelXml);
-          const blob = await zip.generateAsync({
-            type: "blob",
-            compression: "DEFLATE",
-            compressionOptions: { level: 6 },
-          });
+          zip.file("3D/3dmodel.model", xml);
+          const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
           const url = URL.createObjectURL(blob);
           const a = document.createElement("a");
-          a.href = url;
-          a.download = `palamut3d_${Date.now()}.3mf`;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
+          a.href = url; a.download = `palamut3d_${Date.now()}.3mf`;
+          document.body.appendChild(a); a.click(); document.body.removeChild(a);
           URL.revokeObjectURL(url);
+          const t = g.index ? Math.round(g.index.count / 3) : Math.round(g.attributes.position.count / 3);
+          setExportNot(`3MF · ${t.toLocaleString("tr-TR")} üçgen · mm`);
+          g.dispose();
           setExportStatus("done");
-          setTimeout(() => setExportStatus("idle"), 2200);
+          setTimeout(() => { setExportStatus("idle"); setExportNot(""); }, 4200);
         } catch {
-          setExportStatus("error");
-          setTimeout(() => setExportStatus("idle"), 2200);
+          setExportStatus("error"); setExportNot("3MF oluşturulamadı");
+          setTimeout(() => { setExportStatus("idle"); setExportNot(""); }, 2600);
         }
       })();
     }, 40);
-  }, []);
+  }, [exportHazirla]);
 
-  const vertexSayisi = baseGeometry.attributes.position.count;
-  const ucgenSayisi = baseGeometry.index
-    ? Math.round(baseGeometry.index.count / 3)
-    : Math.round(baseGeometry.attributes.position.count / 3);
-  const gosterilenAd = fileName || "kup.stl";
-
-  /* Galeri listesi (presetler + özel haritalar, arama ve kategori filtreli) */
+  /* ---- Türetilmiş değerler ---- */
   const galeriOgeleri = useMemo(() => {
     const q = arama.trim().toLocaleLowerCase("tr-TR");
-    const hepsi: { id: string; name: string; category: string; ozel: boolean }[] = [
+    const hepsi = [
       ...PRESETS.map((p) => ({ id: p.id, name: p.name, category: p.category, ozel: false })),
       ...ozelHaritalar.map((o) => ({ id: o.id, name: o.name, category: "ozel", ozel: true })),
     ];
     return hepsi.filter((o) => {
-      const katOk =
-        category === "tumu" ? true : category === "ozel" ? o.ozel : o.category === category;
-      const adOk = q === "" || o.name.toLocaleLowerCase("tr-TR").includes(q);
-      return katOk && adOk;
+      const katOk = category === "tumu" ? true : category === "ozel" ? o.ozel : o.category === category;
+      return katOk && (q === "" || o.name.toLocaleLowerCase("tr-TR").includes(q));
     });
   }, [category, arama, ozelHaritalar]);
 
-  /* Çözünürlüğe göre kaba poligon tahmini */
+  const ortKenarMm = useMemo(() => ortalamaKenar(baseGeometry) * MM_PER_UNIT, [baseGeometry]);
   const tahminiUcgen = useMemo(() => {
-    const oran = 0.35 / Math.max(0.05, exportRes);
+    const oran = ortKenarMm / Math.max(0.05, exportRes);
     return Math.max(12, Math.round(ucgenSayisi * oran * oran));
-  }, [ucgenSayisi, exportRes]);
+  }, [ucgenSayisi, ortKenarMm, exportRes]);
 
-  const maskAktif = maskTool === "firca";
+  const sahneKontrol = useMemo(() => manifoldDenetle(baseGeometry), [baseGeometry]);
+  const hacimCm3 = useMemo(() => (geoRef.current ? hacimHesapla(geoRef.current) / 1000 : 0), [sizeMm, renkVersion, ucgenSayisi]);
+
   const hepsiGorunur = layers.every((l) => l.visible);
+  const cizimAktif = !!arac || maskeArac;
+  const hedefEtiket = hedefBolge ? `Bölge: ${hedefBolge.ad}` : `Katman: ${presetAdi(aktifKatman?.presetId)}`;
+
+  const Slider = ({ etiket, deger, set, min, max, step, birim, hassas = 2 }) => (
+    <div className="mb-2">
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="field-label">{etiket}</span>
+        <span className="field-value">{Number(deger).toFixed(hassas)}{birim ? ` ${birim}` : ""}</span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={deger}
+        onPointerDown={kaydet}
+        onChange={(e) => set(parseFloat(e.target.value))} />
+    </div>
+  );
+
+  const Cbox = ({ secili, tikla, etiket, alt }) => (
+    <label className="flex cursor-pointer items-start gap-2 text-[11px] text-ink">
+      <button type="button" className="cbox mt-0.5" data-checked={secili} onClick={() => { kaydet(); tikla(); }} aria-label={etiket}>
+        <Icon name="check" size={10} />
+      </button>
+      <span onClick={() => { kaydet(); tikla(); }}>
+        {etiket}
+        {alt ? <span className="field-hint block">{alt}</span> : null}
+      </span>
+    </label>
+  );
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-bg">
-      <header className="flex h-header shrink-0 items-center justify-between border-b border-line bg-panel px-4">
+      <header className="flex min-h-header shrink-0 flex-wrap items-center justify-between gap-y-2 border-b border-line bg-panel px-4 py-2">
         <div className="flex items-center gap-2">
           <Icon name="cube" size={18} className="text-accent" />
           <span className="text-[15px] font-bold leading-none text-ink">Palamut3D</span>
           <span className="mono text-[10px] leading-none text-faint">v2.0</span>
           <span className="sep text-[11px] leading-none">·</span>
           <span className="text-[11px] leading-none text-dim">by</span>
-          <a href="https://mucahidbalci.github.io" target="_blank" rel="noopener noreferrer" className="link text-[11px] leading-none">
-            Mucahid Balci
-          </a>
+          <a href="https://mucahidbalci.github.io" target="_blank" rel="noopener noreferrer" className="link text-[11px] leading-none">Mucahid Balci</a>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <div className="seg">
-            <button type="button" onClick={kubeDon} data-active={mode === "kup"}>
-              <Icon name="cube" size={13} />Küp
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode("stl")}
-              data-active={mode === "stl"}
-              disabled={!fileName}
-              title={fileName ? "Yüklenen STL'ye dön" : "Önce bir STL yükleyin"}
-            >
-              <Icon name="file" size={13} />STL
-            </button>
+            <button type="button" onClick={kubeDon} data-active={mode === "kup"}><Icon name="cube" size={13} />Küp</button>
+            <button type="button" onClick={stlDon} data-active={mode === "stl"} disabled={!stlRef.current} title={stlRef.current ? "Yüklenen STL'ye dön" : "Önce bir STL yükleyin"}><Icon name="file" size={13} />STL</button>
           </div>
-
           <div className="seg">
-            <button type="button" onClick={() => setViewMode("dolu")} data-active={viewMode === "dolu"}>
-              <Icon name="eye" size={13} />Dolu
-            </button>
-            <button type="button" onClick={() => setViewMode("tel")} data-active={viewMode === "tel"}>
-              <Icon name="eye-off" size={13} />Tel
-            </button>
-            <button type="button" onClick={() => setViewMode("kesit")} data-active={viewMode === "kesit"}>
-              <Icon name="layers" size={13} />Kesit
-            </button>
+            <button type="button" onClick={() => setViewMode("dolu")} data-active={viewMode === "dolu"}><Icon name="eye" size={13} />Dolu</button>
+            <button type="button" onClick={() => setViewMode("tel")} data-active={viewMode === "tel"}><Icon name="eye-off" size={13} />Tel</button>
+            <button type="button" onClick={() => setViewMode("kesit")} data-active={viewMode === "kesit"}><Icon name="scissors" size={13} />Kesit</button>
           </div>
-
           <div className="seg">
-            <button type="button" className="btn-icon" aria-label="Geri al" title="Geri al">
-              <Icon name="undo" size={13} />
-            </button>
-            <button type="button" className="btn-icon" aria-label="İleri al" title="İleri al">
-              <Icon name="redo" size={13} />
-            </button>
-            <button type="button" className="btn-icon" aria-label="Projeyi kaydet" title="Projeyi kaydet">
-              <Icon name="save" size={13} />
-            </button>
-            <button type="button" className="btn-icon" aria-label="Proje aç" title="Proje aç">
-              <Icon name="open" size={13} />
-            </button>
+            <button type="button" className="btn-icon" onClick={geriAl} disabled={undoSay === 0} aria-label="Geri al" title={`Geri al (${undoSay})`}><Icon name="undo" size={13} /></button>
+            <button type="button" className="btn-icon" onClick={ileriAl} disabled={redoSay === 0} aria-label="İleri al" title={`İleri al (${redoSay})`}><Icon name="redo" size={13} /></button>
+            <button type="button" className="btn-icon" onClick={projeKaydet} aria-label="Projeyi kaydet" title="Projeyi kaydet (.palamut)"><Icon name="save" size={13} /></button>
+            <button type="button" className="btn-icon" onClick={() => projeInputRef.current?.click()} aria-label="Proje aç" title="Proje aç (.palamut)"><Icon name="open" size={13} /></button>
           </div>
+          <input ref={projeInputRef} type="file" accept=".palamut,.json" className="sr-file-input"
+            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void projeAc(f); }} />
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1">
-        <main className="relative min-w-0 flex-1">
-          <Canvas
-            camera={{ position: [8, 8, 8], fov: 50 }}
-            dpr={[1, 2]}
-            gl={{ antialias: true }}
-          >
+      <div className="flex min-h-0 flex-1 max-lg:flex-col">
+        <main className="relative min-w-0 flex-1 max-lg:min-h-[46vh]">
+          <Canvas camera={{ position: [8, 8, 8], fov: 50 }} dpr={[1, 2]} gl={{ antialias: true, localClippingEnabled: true }}>
             <color attach="background" args={["#0b0e13"]} />
+            <fog attach="fog" args={["#0b0e13", 22, 52]} />
             <ambientLight intensity={0.55} />
-            <directionalLight position={[6, 10, 6]} intensity={1.0} />
-            <directionalLight position={[-8, -4, -6]} intensity={0.45} />
-            <hemisphereLight args={["#8fb4d8", "#0b0e13", 0.2]} />
-
+            <directionalLight position={[6, 10, 6]} intensity={1.05} color="#ffffff" />
+            <directionalLight position={[-8, -4, -6]} intensity={0.45} color="#7dd3fc" />
+            <hemisphereLight args={["#8fb4d8", "#0b0e13", 0.25]} />
+            <SahneKopru />
             <Model
-              baseGeometry={baseGeometry}
-              layers={layers}
-              opts={opts}
-              maskCanvas={maskRef.current}
-              maskVersion={maskVersion}
-              color={color}
-              wireframe={viewMode === "tel"}
-              metalness={metalness}
-              roughness={roughness}
-              preview3D={preview3D}
-              geoRef={geoRef}
-              onMaskHit={maskeBoyan}
-              onSize={handleSize}
-              maskAktif={maskAktif}
+              baseGeometry={baseGeometry} layers={layers} bolgeler={bolgeler} maskeAgirlik={maskeAgirlik}
+              opts={opts} renkVersion={renkVersion} color={color} wireframe={viewMode === "tel"}
+              metalness={metalness} roughness={roughness} preview3D={preview3D}
+              bolgeleriGoster={bolgeleriGoster} kesitAktif={viewMode === "kesit"} kesitY={kesitY}
+              geoRef={geoRef} graf={graf} arac={maskeArac ? "kalem" : arac} onHit={onHit} onSize={handleSize}
+              surukleBoya={arac === "kalem" || arac === "silgi" || maskeArac}
             />
-
-            <Grid
-              position={[0, -2.6, 0]}
-              args={[24, 24]}
-              cellSize={0.5}
-              cellThickness={0.6}
-              cellColor="#232a35"
-              sectionSize={2.5}
-              sectionThickness={1}
-              sectionColor="#2e3745"
-              infiniteGrid
-              fadeDistance={30}
-              fadeStrength={1.2}
-            />
-
-            <OrbitControls enableDamping dampingFactor={0.08} minDistance={3} maxDistance={30} />
+            <Grid position={[0, -2.9, 0]} args={[24, 24]} cellSize={0.5} cellThickness={0.6} cellColor="#232a35" sectionSize={2.5} sectionThickness={1} sectionColor="#2e3745" infiniteGrid fadeDistance={32} fadeStrength={1.2} />
+            <OrbitControls enableDamping dampingFactor={0.08} minDistance={3} maxDistance={30} enabled={!cizimAktif || arac === "sec"} />
           </Canvas>
+
+          {arac === "lasso" ? (
+            <svg className="absolute inset-0 h-full w-full cursor-crosshair" onPointerDown={lassoBasla} onPointerMove={lassoSurdur} onPointerUp={lassoBitir} onPointerLeave={lassoBitir}>
+              {lassoNokta.length > 1 ? (
+                <polygon points={lassoNokta.map((p) => p.join(",")).join(" ")} fill="rgba(34,211,238,0.14)" stroke="#22d3ee" strokeWidth="1.5" strokeDasharray="4 3" />
+              ) : null}
+            </svg>
+          ) : null}
 
           <AxisGizmo />
 
-          <div className="pointer-events-none absolute bottom-3 left-3 text-[10px] text-faint">
-            {maskAktif
-              ? "Fırça aktif · Sol tık: boya · Shift + sol tık: sil"
+          <div className="pointer-events-none absolute bottom-3 left-3 max-w-[70%] text-[10px] leading-relaxed text-faint">
+            {maskeArac
+              ? "Maske fırçası · Sol tık + sürükle: boya"
+              : arac === "kalem"
+              ? "Kalem · Sol tık + sürükle: bölgeye doku alanı boya"
+              : arac === "silgi"
+              ? "Silgi · Sol tık + sürükle: bölgeden çıkar"
+              : arac === "lasso"
+              ? "Lasso · Basılı tut, kapalı alan çiz, bırak"
+              : arac === "sec"
+              ? "Seç · Modele tıkla, en baskın bölge seçilir"
+              : stampMode
+              ? "Damga · Modele tıkla, desen merkezi oraya taşınır"
               : "Sol tık: döndür · Tekerlek: yakınlaştır · Sağ tık: kaydır"}
           </div>
 
-          {!preview3D ? (
-            <div className="mono pointer-events-none absolute bottom-3 right-3 rounded-btn border border-line bg-panel px-2 py-1 text-[10px] text-dim">
-              Önizleme kapalı · düz geometri
-            </div>
-          ) : null}
+          <div className="pointer-events-none absolute left-3 top-3 flex flex-col gap-1">
+            {!preview3D ? (
+              <span className="mono rounded-btn border border-line bg-panel/90 px-2 py-1 text-[10px] text-dim">Önizleme kapalı · düz geometri</span>
+            ) : null}
+            {cizimAktif ? (
+              <span className="mono rounded-btn border px-2 py-1 text-[10px]" style={{ borderColor: "#22d3ee", color: "#22d3ee", background: "rgba(34,211,238,0.12)" }}>
+                {maskeArac ? "Maske boyama" : `${ARACLAR.find((a) => a.id === arac)?.label} · ${aktifBolgeObj ? aktifBolgeObj.ad : "bölge yok"}`}
+              </span>
+            ) : null}
+          </div>
         </main>
 
-        <aside className="panel">
+        <aside className="panel max-lg:w-full max-lg:flex-1 max-lg:border-l-0 max-lg:border-t">
+          {/* MODEL */}
           <section className="card mb-2">
             <div className="mb-2 flex items-center justify-between">
               <h2 className="card-title">Model</h2>
               <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  className="btn btn-icon"
-                  title="Varsayılan küpe dön"
-                  aria-label="Varsayılan küpe dön"
-                  onClick={kubeDon}
-                >
-                  <Icon name="cube" size={13} />
-                </button>
+                <button type="button" className="btn btn-icon" title="Varsayılan küpe dön" aria-label="Varsayılan küpe dön" onClick={kubeDon}><Icon name="cube" size={13} /></button>
                 <Icon name="folder" size={14} className="text-faint" />
               </div>
             </div>
-
-            <label
-              className="dropzone block cursor-pointer px-3 py-4 text-center"
-              data-drag={surukleAktif ? "true" : "false"}
-              onDragOver={(e) => {
-                e.preventDefault();
-                setSurukleAktif(true);
-              }}
+            <label className="dropzone block cursor-pointer px-3 py-4 text-center" data-drag={surukleAktif ? "true" : "false"}
+              onDragOver={(e) => { e.preventDefault(); setSurukleAktif(true); }}
               onDragLeave={() => setSurukleAktif(false)}
-              onDrop={(e) => {
-                e.preventDefault();
-                setSurukleAktif(false);
-                const f = e.dataTransfer.files?.[0];
-                if (f) handleFile(f);
-              }}
-            >
-              <input
-                ref={stlInputRef}
-                type="file"
-                accept=".stl"
-                className="sr-file-input"
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  e.target.value = "";
-                  if (f) handleFile(f);
-                }}
-              />
+              onDrop={(e) => { e.preventDefault(); setSurukleAktif(false); const f = e.dataTransfer.files?.[0]; if (f) handleFile(f); }}>
+              <input ref={stlInputRef} type="file" accept=".stl" className="sr-file-input" onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) handleFile(f); }} />
               <Icon name="upload" size={20} className="mx-auto mb-1.5 text-dim" />
               <div className="text-[11px] text-ink">STL dosyasını buraya bırakın</div>
-              <div className="mt-0.5 text-[10px] text-dim">
-                veya <span className="text-accent underline underline-offset-2">dosya seçin</span>
-              </div>
+              <div className="mt-0.5 text-[10px] text-dim">veya <span className="text-accent underline underline-offset-2">dosya seçin</span></div>
               <div className="mono mt-1 text-[9px] text-faint">ASCII veya ikili STL · en fazla {MAX_STL_MB} MB</div>
             </label>
-
             <div className="mono mt-2 text-[10px] leading-relaxed text-dim">
               {fileName ? (
                 <span>
-                  <span className="text-ink">{fileName}</span>
-                  <span className="sep"> | STL | </span>
-                  <span className="tnum">{fileSizeKB} KB</span>
-                  <span className="sep"> | </span>
+                  <span className="text-ink">{fileName}</span><span className="sep"> | STL | </span>
+                  <span className="tnum">{fileSizeKB} KB</span><span className="sep"> | </span>
                   <span className="tnum">{ucgenSayisi.toLocaleString("tr-TR")} üçgen</span>
-                  <span className="sep"> | </span>
-                  <span className="tnum">{vertexSayisi.toLocaleString("tr-TR")} vertex</span>
                 </span>
-              ) : (
-                <span className="text-faint">Varsayılan küp üzerinde çalışılıyor</span>
-              )}
+              ) : <span className="text-faint">Varsayılan küp üzerinde çalışılıyor</span>}
+            </div>
+            <div className="mono mt-1 flex items-center gap-1.5 text-[10px]">
+              <span style={{ color: sahneKontrol.sinir === 0 && sahneKontrol.nonManifold === 0 ? "#34d399" : "#fbbf24" }}>
+                {sahneKontrol.sinir === 0 && sahneKontrol.nonManifold === 0 ? "Kapalı katı" : `${sahneKontrol.sinir} sınır · ${sahneKontrol.nonManifold} non-manifold`}
+              </span>
+              <span className="sep">|</span>
+              <span className="text-dim tnum">{ortKenarMm.toFixed(2)} mm kenar</span>
             </div>
           </section>
 
+          {/* ARAÇLAR */}
+          <section className="card mb-2">
+            <div className="mb-2 flex items-center justify-between">
+              <h2 className="card-title">Yüzey Araçları</h2>
+              <Icon name="brush" size={14} className="text-faint" />
+            </div>
+            <div className="mb-2 grid grid-cols-4 gap-1">
+              {ARACLAR.map((a) => (
+                <button key={a.id} type="button" className="btn flex-col !gap-1 !py-1.5"
+                  data-active={arac === a.id && !maskeArac}
+                  onClick={() => { setMaskeArac(false); setArac(arac === a.id ? null : a.id); }}>
+                  <Icon name={a.ikon} size={13} />
+                  <span className="text-[9px]">{a.label}</span>
+                </button>
+              ))}
+            </div>
+            <Slider etiket="Fırça çapı" deger={fircaMm} set={setFircaMm} min={1} max={40} step={0.5} birim="mm" hassas={1} />
+            <Slider etiket="Kenar yumuşaklığı" deger={featherMm} set={setFeatherMm} min={0.2} max={20} step={0.2} birim="mm" hassas={1} />
+            <div className="mono mb-1.5 rounded-btn border border-line bg-bg px-2 py-1 text-[10px] text-dim">
+              Hedef: <span style={{ color: "#22d3ee" }}>{hedefEtiket}</span>
+            </div>
+            <p className="field-hint">
+              Kalem ve silgi yüzey komşuluğu boyunca yürür; modelin arka yüzü etkilenmez. Lasso ile kapalı alan çizip tek seferde bölge oluşturabilirsiniz.
+            </p>
+          </section>
+
+          {/* BÖLGELER */}
+          <section className="card mb-2">
+            <div className="mb-2 flex items-center justify-between">
+              <h2 className="card-title">Bölgeler</h2>
+              <div className="flex items-center gap-1">
+                <span className="mono text-[10px] text-faint">{bolgeler.length}/{MAX_BOLGE}</span>
+                <button type="button" className="btn btn-icon" data-active={bolgeleriGoster} onClick={() => setBolgeleriGoster((v) => !v)} title="Bölge renklerini göster" aria-label="Bölge renklerini göster">
+                  <Icon name={bolgeleriGoster ? "eye" : "eye-off"} size={12} />
+                </button>
+              </div>
+            </div>
+
+            {bolgeler.length === 0 ? (
+              <p className="field-hint mb-2">Henüz bölge yok. Kalemle modelin üzerine çizin ya da Lasso ile alan seçin; her bölge kendi dokusunu taşır.</p>
+            ) : (
+              <div className="mb-2 space-y-1.5">
+                {bolgeler.map((b) => (
+                  <div key={b.id} onClick={() => setAktifBolge(b.id)}
+                    className={`cursor-pointer rounded-btn border p-1.5 transition-colors duration-150 ${b.id === aktifBolge ? "bg-accent-soft" : "bg-bg hover:border-line-strong"}`}
+                    style={{ borderColor: b.id === aktifBolge ? b.renk : undefined }}>
+                    <div className="mb-1.5 flex items-center gap-1.5">
+                      <span className="h-3 w-3 shrink-0 rounded-full" style={{ background: b.renk }} />
+                      <input type="text" value={b.ad} onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => bolgeGuncelle(b.id, "ad", e.target.value.slice(0, 24))}
+                        className="min-w-0 flex-1 !border-transparent !bg-transparent !px-0 !text-[11px]" style={{ fontFamily: "inherit" }} />
+                      <div className="h-5 w-5 shrink-0 overflow-hidden rounded-swatch border border-line-strong">
+                        {thumbs[b.presetId] ? <img src={thumbs[b.presetId]} alt="" className="h-full w-full object-cover" /> : null}
+                      </div>
+                      <button type="button" className="btn btn-icon" data-active={b.gorunur} title="Bölgeyi aç/kapat" aria-label="Bölgeyi aç/kapat"
+                        onClick={(e) => { e.stopPropagation(); kaydet(); bolgeGuncelle(b.id, "gorunur", !b.gorunur); }}>
+                        <Icon name={b.gorunur ? "eye" : "eye-off"} size={11} />
+                      </button>
+                      <button type="button" className="btn btn-icon" title="Bölgeyi sil" aria-label="Bölgeyi sil"
+                        onClick={(e) => { e.stopPropagation(); bolgeSil(b.id); }}>
+                        <Icon name="trash" size={11} />
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                      <select value={b.blend} onChange={(e) => { kaydet(); bolgeGuncelle(b.id, "blend", e.target.value); }}
+                        className="appearance-none rounded-btn border border-line bg-card py-0.5 pl-1 pr-1 text-[10px] text-dim">
+                        {BLEND_MODES.map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}
+                      </select>
+                      <input type="range" min={0} max={5} step={0.05} value={b.derinlik}
+                        onPointerDown={kaydet} onChange={(e) => bolgeGuncelle(b.id, "derinlik", parseFloat(e.target.value))} className="min-w-0 flex-1" />
+                      <span className="mono w-10 shrink-0 text-right text-[9px] tnum text-dim">{b.derinlik.toFixed(2)}</span>
+                    </div>
+                    {b.id === aktifBolge ? (
+                      <div className="mt-1.5 grid grid-cols-2 gap-1.5" onClick={(e) => e.stopPropagation()}>
+                        <div>
+                          <div className="mb-1 flex justify-between text-[9px] text-dim"><span>Ölçek U</span><span className="mono tnum" style={{ color: b.renk }}>{b.olcekU.toFixed(1)}</span></div>
+                          <input type="range" min={0.2} max={60} step={0.2} value={b.olcekU} onPointerDown={kaydet} onChange={(e) => bolgeGuncelle(b.id, "olcekU", parseFloat(e.target.value))} />
+                        </div>
+                        <div>
+                          <div className="mb-1 flex justify-between text-[9px] text-dim"><span>Rotasyon</span><span className="mono tnum" style={{ color: b.renk }}>{b.rotasyon}°</span></div>
+                          <input type="range" min={0} max={360} step={1} value={b.rotasyon} onPointerDown={kaydet} onChange={(e) => bolgeGuncelle(b.id, "rotasyon", parseFloat(e.target.value))} />
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-1.5">
+              <button type="button" className="btn" onClick={bolgeEkle} disabled={bolgeler.length >= MAX_BOLGE}><Icon name="plus" size={12} />Bölge ekle</button>
+              <button type="button" className="btn" onClick={bolgeTemizle} disabled={bolgeler.length === 0}><Icon name="eraser" size={12} />Tümünü sil</button>
+            </div>
+          </section>
+
+          {/* GÖRÜNÜM */}
           <section className="card mb-2">
             <div className="mb-2 flex items-center justify-between">
               <h2 className="card-title">Görünüm</h2>
               <Icon name="palette" size={14} className="text-faint" />
             </div>
-
             <div className="mb-2 flex flex-wrap gap-1.5">
               {QUICK_COLORS.map((c) => (
-                <button
-                  key={c}
-                  type="button"
-                  onClick={() => setColor(c)}
-                  className={`h-5 w-5 rounded-btn border ${
-                    color.toLocaleLowerCase("tr-TR") === c
-                      ? "border-accent ring-1 ring-accent"
-                      : "border-line-strong"
-                  } flex items-center justify-center text-bg`}
-                  style={{ background: c }}
-                  title={c}
-                  aria-label={`Renk ${c}`}
-                >
-                  {color.toLocaleLowerCase("tr-TR") === c ? <Icon name="check" size={9} /> : null}
+                <button key={c} type="button" onClick={() => { kaydet(); setColor(c); }}
+                  className={`flex h-5 w-5 items-center justify-center rounded-btn border text-bg ${color.toLowerCase() === c ? "border-accent ring-1 ring-accent" : "border-line-strong"}`}
+                  style={{ background: c }} title={c} aria-label={`Renk ${c}`}>
+                  {color.toLowerCase() === c ? <Icon name="check" size={9} /> : null}
                 </button>
               ))}
             </div>
-
             <div className="mb-2 flex items-center gap-1.5">
-              <input
-                type="color"
-                value={color}
-                onChange={(e) => setColor(e.target.value)}
-                className="h-7 w-9 shrink-0 cursor-pointer rounded-btn border border-line bg-bg p-0.5"
-                aria-label="Özel renk seç"
-              />
-              <input
-                type="text"
-                value={color}
-                onChange={(e) => {
-                  const v = e.target.value.trim();
-                  if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v)) setColor(v);
-                }}
-                className="mono min-w-0 flex-1"
-                aria-label="Renk kodu"
-              />
+              <input type="color" value={color} onChange={(e) => setColor(e.target.value)} className="h-7 w-9 shrink-0 cursor-pointer rounded-btn border border-line bg-bg p-0.5" aria-label="Özel renk seç" />
+              <input type="text" value={color} onChange={(e) => { const v = e.target.value.trim(); if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v)) setColor(v); }} className="mono min-w-0 flex-1" aria-label="Renk kodu" />
             </div>
-
-            <div className="mb-2">
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="field-label">Metalik</span>
-                <span className="field-value">{metalness.toFixed(2)}</span>
-              </div>
-              <input type="range" min={0} max={1} step={0.01} value={metalness} onChange={(e) => setMetalness(parseFloat(e.target.value))} />
-            </div>
-
-            <div>
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="field-label">Pürüzlülük</span>
-                <span className="field-value">{roughness.toFixed(2)}</span>
-              </div>
-              <input type="range" min={0} max={1} step={0.01} value={roughness} onChange={(e) => setRoughness(parseFloat(e.target.value))} />
+            <Slider etiket="Metalik" deger={metalness} set={setMetalness} min={0} max={1} step={0.01} />
+            <Slider etiket="Pürüzlülük" deger={roughness} set={setRoughness} min={0} max={1} step={0.01} />
+            {viewMode === "kesit" ? <Slider etiket="Kesit yüksekliği" deger={kesitY} set={setKesitY} min={-3} max={3} step={0.02} birim="mm" /> : null}
+            <div className="grid grid-cols-2 gap-1.5">
+              <button type="button" className="btn" onClick={sifirla}><Icon name="refresh" size={12} />Sıfırla</button>
+              <button type="button" className="btn" onClick={rastgele}><Icon name="shuffle" size={12} />Rastgele</button>
             </div>
           </section>
 
+          {/* KATMANLAR */}
           <section className="card mb-2">
             <div className="mb-2 flex items-center justify-between">
-              <h2 className="card-title">Kabartma Katmanları</h2>
+              <h2 className="card-title">Global Katmanlar</h2>
               <div className="flex items-center gap-1">
                 <span className="mono text-[10px] text-faint">{layers.length}/{MAX_LAYERS}</span>
-                <button
-                  type="button"
-                  className="btn btn-icon"
-                  data-active={hepsiGorunur}
-                  onClick={() => tumGorunurluk(!hepsiGorunur)}
-                  title={hepsiGorunur ? "Tüm katmanları gizle" : "Tüm katmanları göster"}
-                  aria-label={hepsiGorunur ? "Tüm katmanları gizle" : "Tüm katmanları göster"}
-                >
+                <button type="button" className="btn btn-icon" data-active={hepsiGorunur}
+                  onClick={() => { kaydet(); setLayers((ls) => ls.map((l) => ({ ...l, visible: !hepsiGorunur }))); }}
+                  title="Tüm katmanları aç/kapat" aria-label="Tüm katmanları aç/kapat">
                   <Icon name={hepsiGorunur ? "eye" : "eye-off"} size={12} />
                 </button>
               </div>
             </div>
-
-            <div className="relative mb-2">
-              <select
-                value={activeLayer}
-                onChange={(e) => setActiveLayer(e.target.value)}
-                className="w-full appearance-none rounded-btn border border-line bg-bg px-2 py-1 pr-6 text-[11px] text-ink"
-              >
-                {layers.map((l, i) => (
-                  <option key={l.id} value={l.id}>
-                    {i + 1} · {presetAdi(l.presetId)}
-                  </option>
-                ))}
-              </select>
-              <Icon name="chevron-down" size={12} className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-faint" />
-            </div>
-
             <div className="mb-2 space-y-1.5">
               {layers.map((l, i) => (
-                <div
-                  key={l.id}
-                  onClick={() => setActiveLayer(l.id)}
-                  className={`cursor-pointer rounded-btn border p-1.5 transition-colors duration-150 ${
-                    l.id === activeLayer
-                      ? "border-accent bg-accent-soft"
-                      : "border-line bg-bg hover:border-line-strong"
-                  }`}
-                >
+                <div key={l.id} onClick={() => setActiveLayer(l.id)}
+                  className={`cursor-pointer rounded-btn border p-1.5 transition-colors duration-150 ${l.id === activeLayer ? "border-accent bg-accent-soft" : "border-line bg-bg hover:border-line-strong"}`}>
                   <div className="mb-1.5 flex items-center gap-1.5">
                     <span className="mono w-3 shrink-0 text-[9px] text-faint">{i + 1}</span>
                     <div className="h-6 w-6 shrink-0 overflow-hidden rounded-swatch border border-line-strong">
-                      {thumbs[l.presetId] ? (
-                        <img src={thumbs[l.presetId]} alt="" className="h-full w-full object-cover" />
-                      ) : null}
+                      {thumbs[l.presetId] ? <img src={thumbs[l.presetId]} alt="" className="h-full w-full object-cover" /> : null}
                     </div>
-                    <span className={`min-w-0 flex-1 truncate text-[11px] ${l.visible ? "text-ink" : "text-faint"}`}>
-                      {presetAdi(l.presetId)}
-                    </span>
-                    <button
-                      type="button"
-                      className="btn btn-icon"
-                      title="Yukarı taşı"
-                      aria-label="Yukarı taşı"
-                      disabled={i === 0}
-                      onClick={(e) => { e.stopPropagation(); katmanTasi(l.id, -1); }}
-                    >
-                      <Icon name="chevron-up" size={11} />
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-icon"
-                      title="Aşağı taşı"
-                      aria-label="Aşağı taşı"
-                      disabled={i === layers.length - 1}
-                      onClick={(e) => { e.stopPropagation(); katmanTasi(l.id, 1); }}
-                    >
-                      <Icon name="chevron-down" size={11} />
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-icon"
-                      data-active={l.visible}
-                      title={l.visible ? "Katmanı gizle" : "Katmanı göster"}
-                      aria-label={l.visible ? "Katmanı gizle" : "Katmanı göster"}
-                      onClick={(e) => { e.stopPropagation(); katmanGorunurluk(l.id); }}
-                    >
-                      <Icon name={l.visible ? "eye" : "eye-off"} size={11} />
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-icon"
-                      title="Katmanı çoğalt"
-                      aria-label="Katmanı çoğalt"
-                      disabled={layers.length >= MAX_LAYERS}
-                      onClick={(e) => { e.stopPropagation(); katmanKopyala(l.id); }}
-                    >
-                      <Icon name="copy" size={11} />
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-icon"
-                      title="Katmanı sil"
-                      aria-label="Katmanı sil"
-                      disabled={layers.length === 1}
-                      onClick={(e) => { e.stopPropagation(); katmanSil(l.id); }}
-                    >
-                      <Icon name="trash" size={11} />
-                    </button>
+                    <span className={`min-w-0 flex-1 truncate text-[11px] ${l.visible ? "text-ink" : "text-faint"}`}>{presetAdi(l.presetId)}</span>
+                    <button type="button" className="btn btn-icon" title="Yukarı taşı" aria-label="Yukarı taşı" disabled={i === 0} onClick={(e) => { e.stopPropagation(); katmanTasi(l.id, -1); }}><Icon name="chevron-up" size={11} /></button>
+                    <button type="button" className="btn btn-icon" title="Aşağı taşı" aria-label="Aşağı taşı" disabled={i === layers.length - 1} onClick={(e) => { e.stopPropagation(); katmanTasi(l.id, 1); }}><Icon name="chevron-down" size={11} /></button>
+                    <button type="button" className="btn btn-icon" data-active={l.visible} title="Katmanı aç/kapat" aria-label="Katmanı aç/kapat" onClick={(e) => { e.stopPropagation(); kaydet(); setLayers((ls) => ls.map((x) => (x.id === l.id ? { ...x, visible: !x.visible } : x))); }}><Icon name={l.visible ? "eye" : "eye-off"} size={11} /></button>
+                    <button type="button" className="btn btn-icon" title="Katmanı çoğalt" aria-label="Katmanı çoğalt" disabled={layers.length >= MAX_LAYERS} onClick={(e) => { e.stopPropagation(); katmanKopyala(l.id); }}><Icon name="copy" size={11} /></button>
+                    <button type="button" className="btn btn-icon" title="Katmanı sil" aria-label="Katmanı sil" disabled={layers.length === 1} onClick={(e) => { e.stopPropagation(); katmanSil(l.id); }}><Icon name="trash" size={11} /></button>
                   </div>
-
-                  <div className="flex items-center gap-1.5">
-                    <div className="relative">
-                      <select
-                        value={l.blend}
-                        onChange={(e) =>
-                          setLayers((ls) => ls.map((x) => (x.id === l.id ? { ...x, blend: e.target.value } : x)))
-                        }
-                        onClick={(e) => e.stopPropagation()}
-                        className="appearance-none rounded-btn border border-line bg-card py-0.5 pl-1 pr-4 text-[10px] text-dim"
-                      >
-                        {BLEND_MODES.map((b) => (
-                          <option key={b.id} value={b.id}>{b.label}</option>
-                        ))}
-                      </select>
-                      <Icon name="chevron-down" size={9} className="pointer-events-none absolute right-0.5 top-1/2 -translate-y-1/2 text-faint" />
-                    </div>
+                  <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                    <select value={l.blend} onChange={(e) => { kaydet(); setLayers((ls) => ls.map((x) => (x.id === l.id ? { ...x, blend: e.target.value } : x))); }}
+                      className="appearance-none rounded-btn border border-line bg-card py-0.5 pl-1 pr-1 text-[10px] text-dim">
+                      {BLEND_MODES.map((b) => <option key={b.id} value={b.id}>{b.label}</option>)}
+                    </select>
                     <span className="field-label shrink-0">Derinlik</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={2}
-                      step={0.01}
-                      value={l.depth}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => katmanDerinlik(l.id, parseFloat(e.target.value))}
-                      className="min-w-0 flex-1"
-                    />
-                    <span className="mono w-8 shrink-0 text-right text-[9px] tnum text-dim">
-                      {l.depth.toFixed(2)}
-                    </span>
+                    <input type="range" min={0} max={2} step={0.01} value={l.depth} onPointerDown={kaydet}
+                      onChange={(e) => setLayers((ls) => ls.map((x) => (x.id === l.id ? { ...x, depth: parseFloat(e.target.value) } : x)))} className="min-w-0 flex-1" />
+                    <span className="mono w-8 shrink-0 text-right text-[9px] tnum text-dim">{l.depth.toFixed(2)}</span>
                   </div>
                 </div>
               ))}
             </div>
-
-            <button type="button" className="btn w-full" onClick={katmanEkle} disabled={layers.length >= MAX_LAYERS}>
-              <Icon name="plus" size={12} />
-              Katman ekle
-            </button>
-            <p className="field-hint mt-1.5">
-              Katmanlar yukarıdan aşağıya doğru üst üste bindirilir. Blend modu ve derinlik her katman için ayrı çalışır.
-            </p>
+            <button type="button" className="btn w-full" onClick={katmanEkle} disabled={layers.length >= MAX_LAYERS}><Icon name="plus" size={12} />Katman ekle</button>
           </section>
 
+          {/* GALERİ */}
           <section className="card mb-2">
             <div className="mb-2 flex items-center justify-between">
               <h2 className="card-title">Doku Galerisi</h2>
-              <span className="mono text-[10px] text-faint">
-                {galeriOgeleri.length}/{PRESETS.length + ozelHaritalar.length}
-              </span>
+              <span className="mono text-[10px] text-faint">{galeriOgeleri.length}/{PRESETS.length + ozelHaritalar.length}</span>
             </div>
-
             <div className="relative mb-2">
-              <input
-                type="search"
-                value={arama}
-                onChange={(e) => setArama(e.target.value)}
-                placeholder="Doku ara"
-                className="w-full pr-6"
-              />
+              <input type="search" value={arama} onChange={(e) => setArama(e.target.value)} placeholder="Doku ara" className="w-full pr-6" />
               <Icon name="grid" size={12} className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-faint" />
             </div>
-
             <div className="mb-2 flex flex-wrap gap-1">
               {CATEGORIES.map((c) => (
-                <button
-                  key={c.id}
-                  type="button"
-                  onClick={() => setCategory(c.id)}
-                  className={`rounded-btn border px-1.5 py-0.5 text-[10px] transition-colors duration-150 ${
-                    category === c.id
-                      ? "border-accent bg-accent-soft text-accent"
-                      : "border-line text-dim hover:border-line-strong hover:text-ink"
-                  }`}
-                >
-                  {c.label}
-                  {c.id === "ozel" ? ` (${ozelHaritalar.length})` : ""}
+                <button key={c.id} type="button" onClick={() => setCategory(c.id)}
+                  className={`rounded-btn border px-1.5 py-0.5 text-[10px] transition-colors duration-150 ${category === c.id ? "border-accent bg-accent-soft text-accent" : "border-line text-dim hover:border-line-strong hover:text-ink"}`}>
+                  {c.label}{c.id === "ozel" ? ` (${ozelHaritalar.length})` : ""}
                 </button>
               ))}
             </div>
-
             <div className="grid grid-cols-5 gap-1.5">
-              {galeriOgeleri.map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => presetSec(p.id)}
-                  className="thumb-cell"
-                  data-selected={aktifKatman?.presetId === p.id}
-                  title={p.name}
-                  aria-label={p.name}
-                >
-                  {thumbs[p.id] ? (
-                    <img src={thumbs[p.id]} alt={p.name} className="h-full w-full object-cover" />
-                  ) : (
-                    <span className="block h-full w-full bg-card" />
-                  )}
-                  {aktifKatman?.presetId === p.id ? (
-                    <span className="absolute bottom-0.5 right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-accent text-bg">
-                      <Icon name="check" size={9} />
-                    </span>
-                  ) : null}
-                  {p.ozel ? (
-                    <span
-                      role="button"
-                      tabIndex={-1}
-                      onClick={(e) => { e.stopPropagation(); ozelHaritaSil(p.id); }}
-                      className="absolute right-0.5 top-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-bg/85 text-dim hover:text-ink"
-                      title="Özel haritayı sil"
-                    >
-                      <Icon name="x" size={8} />
-                    </span>
-                  ) : null}
-                </button>
-              ))}
+              {galeriOgeleri.map((p) => {
+                const secili = (hedefBolge ? hedefBolge.presetId : aktifKatman?.presetId) === p.id;
+                return (
+                  <button key={p.id} type="button" onClick={() => presetSec(p.id)} className="thumb-cell" data-selected={secili} title={p.name} aria-label={p.name}>
+                    {thumbs[p.id] ? <img src={thumbs[p.id]} alt={p.name} className="h-full w-full object-cover" /> : <span className="block h-full w-full bg-card" />}
+                    {secili ? <span className="absolute bottom-0.5 right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-accent text-bg"><Icon name="check" size={9} /></span> : null}
+                    {p.ozel ? (
+                      <span role="button" tabIndex={-1} onClick={(e) => { e.stopPropagation(); ozelHaritaSil(p.id); }}
+                        className="absolute right-0.5 top-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-bg/85 text-dim hover:text-ink" title="Özel haritayı sil">
+                        <Icon name="x" size={8} />
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
             </div>
-
-            {galeriOgeleri.length === 0 ? (
-              <div className="mono mt-2 text-[10px] text-faint">
-                {category === "ozel" && ozelHaritalar.length === 0
-                  ? "Henüz özel harita yok. PNG veya JPG yükleyin."
-                  : "Eşleşen doku yok."}
-              </div>
-            ) : null}
-
-            <input
-              ref={ozelInputRef}
-              type="file"
-              accept="image/png,image/jpeg,image/webp"
-              className="sr-file-input"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                e.target.value = "";
-                if (f) void ozelHaritaYukle(f);
-              }}
-            />
-            <button type="button" className="btn mt-2 w-full" onClick={() => ozelInputRef.current?.click()}>
-              <Icon name="image" size={12} />
-              Özelleştirilmiş bir harita yükle
-            </button>
-            <p className="field-hint mt-1.5">
-              PNG / JPG / WEBP. Görsel 512 × 512&apos;ye kırpılır ve gri tonlamalı yükseklik olarak okunur.
-            </p>
+            {galeriOgeleri.length === 0 ? <div className="mono mt-2 text-[10px] text-faint">{category === "ozel" && ozelHaritalar.length === 0 ? "Henüz özel harita yok. PNG veya JPG yükleyin." : "Eşleşen doku yok."}</div> : null}
+            <input ref={ozelInputRef} type="file" accept="image/png,image/jpeg,image/webp" className="sr-file-input" onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void ozelHaritaYukle(f); }} />
+            <button type="button" className="btn mt-2 w-full" onClick={() => ozelInputRef.current?.click()}><Icon name="image" size={12} />Özelleştirilmiş harita yükle</button>
             {yuklemeDurum ? <div className="mono mt-1 text-[10px] text-accent">{yuklemeDurum}</div> : null}
           </section>
 
+          {/* YANSITMA */}
           <section className="card mb-2">
             <div className="mb-2 flex items-center justify-between">
               <h2 className="card-title">Yansıtma</h2>
               <Icon name="target" size={14} className="text-faint" />
             </div>
-
             <div className="relative mb-2">
-              <select
-                value={projection}
-                onChange={(e) => setProjection(e.target.value)}
-                className="w-full appearance-none rounded-btn border border-line bg-bg px-2 py-1 pr-6 text-[11px] text-ink"
-              >
-                <option value="uv">UV</option>
+              <select value={projection} onChange={(e) => { kaydet(); setProjection(e.target.value); }} className="w-full appearance-none rounded-btn border border-line bg-bg px-2 py-1 pr-6 text-[11px] text-ink">
                 <option value="tri">Üç düzlemli (Triplanar)</option>
+                <option value="uv">UV</option>
                 <option value="kutu">Kutu</option>
                 <option value="kuresel">Küresel</option>
               </select>
               <Icon name="chevron-down" size={12} className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-faint" />
             </div>
-
-            <div className="mb-2">
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="field-label">Kesişme Yumuşatma Seviyesi</span>
-                <span className="field-value">{blendSmooth.toFixed(2)}</span>
-              </div>
-              <input type="range" min={0} max={1} step={0.05} value={blendSmooth} onChange={(e) => setBlendSmooth(parseFloat(e.target.value))} />
-            </div>
-
-            <button type="button" className="btn w-full" data-active={stampMode} onClick={() => setStampMode((v) => !v)}>
-              <Icon name="stamp" size={12} />
-              Damga modu
+            <Slider etiket="Kesişme yumuşatma" deger={blendSmooth} set={setBlendSmooth} min={0.05} max={1} step={0.05} />
+            <button type="button" className="btn w-full" data-active={stampMode} onClick={() => { setStampMode((v) => !v); if (!stampMode) { setArac(null); setMaskeArac(false); } }}>
+              <Icon name="stamp" size={12} />Damga modu
             </button>
-            <p className="field-hint mt-1.5">
-              Açıkken desen tekrarlamaz; modele tek noktaya basılır. Yeri sahnede tıklayarak seçin.
-            </p>
+            {stampMode ? (
+              <div className="mt-2">
+                <Slider etiket="Damga boyutu" deger={stampBoyut} set={setStampBoyut} min={2} max={50} step={0.5} birim="mm" hassas={1} />
+                <button type="button" className="btn w-full" onClick={() => setStampMerkez(null)} disabled={!stampMerkez}><Icon name="x" size={12} />Damga merkezini kaldır</button>
+              </div>
+            ) : null}
+            <p className="field-hint mt-1.5">Damga açıkken desen tekrarlamaz; sahneye tıklayarak merkezi seçin.</p>
           </section>
 
+          {/* DERİNLİK */}
           <section className="card mb-2">
             <div className="mb-2 flex items-center justify-between">
               <h2 className="card-title">Kabartma Derinliği</h2>
               <Icon name="ruler" size={14} className="text-faint" />
             </div>
-
-            <div className="mb-2">
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="field-label">Kabartma uzunluğu</span>
-                <span className="field-value">{amplitudeMm.toFixed(2)} mm</span>
-              </div>
-              <input type="range" min={0} max={5} step={0.01} value={amplitudeMm} onChange={(e) => setAmplitudeMm(parseFloat(e.target.value))} />
-            </div>
-
+            <Slider etiket="Kabartma uzunluğu" deger={amplitudeMm} set={setAmplitudeMm} min={0} max={5} step={0.01} birim="mm" />
             <div className="mb-2 space-y-1.5">
-              <label className="flex cursor-pointer items-start gap-2 text-[11px] text-ink">
-                <button type="button" className="cbox mt-0.5" data-checked={invert} onClick={() => setInvert((v) => !v)} aria-label="Yönü değiştir">
-                  <Icon name="check" size={10} />
-                </button>
-                <span onClick={() => setInvert((v) => !v)}>
-                  Yönü değiştir
-                  <span className="field-hint block">Kabartma dışarı çıkmak yerine içeri çöker.</span>
-                </span>
-              </label>
-
-              <label className="flex cursor-pointer items-center gap-2 text-[11px] text-ink">
-                <button type="button" className="cbox" data-checked={symmetric} onClick={() => setSymmetric((v) => !v)} aria-label="Simetrik kabartma">
-                  <Icon name="check" size={10} />
-                </button>
-                <span onClick={() => setSymmetric((v) => !v)}>Simetrik Kabartma</span>
-              </label>
-
-              <label className="flex cursor-pointer items-center gap-2 text-[11px] text-ink">
-                <button type="button" className="cbox" data-checked={preview3D} onClick={() => setPreview3D((v) => !v)} aria-label="3D önizleme">
-                  <Icon name="check" size={10} />
-                </button>
-                <span onClick={() => setPreview3D((v) => !v)}>
-                  3D Önizleme
-                  <span className="field-hint block">Kapatıldığında displacement hesaplanmaz, düz geometri görünür.</span>
-                </span>
-              </label>
+              <Cbox secili={invert} tikla={() => setInvert((v) => !v)} etiket="Yönü değiştir" alt="Kabartma dışarı çıkmak yerine içeri çöker." />
+              <Cbox secili={symmetric} tikla={() => setSymmetric((v) => !v)} etiket="Simetrik kabartma" />
+              <Cbox secili={preview3D} tikla={() => setPreview3D((v) => !v)} etiket="3D önizleme" alt="Kapatıldığında displacement hesaplanmaz." />
             </div>
-
-            <div className="mb-2">
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="field-label">Kaplama Yumuşatma</span>
-                <span className="field-value">{smoothing.toFixed(2)}</span>
-              </div>
-              <input type="range" min={0} max={1} step={0.05} value={smoothing} onChange={(e) => setSmoothing(parseFloat(e.target.value))} />
-            </div>
-
-            <div className="mb-2">
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="field-label">Geometri Yumuşatma</span>
-                <span className="field-value">{geoYumusatma.toFixed(2)}</span>
-              </div>
-              <input type="range" min={0} max={1} step={0.05} value={geoYumusatma} onChange={(e) => setGeoYumusatma(parseFloat(e.target.value))} />
-              <p className="field-hint mt-1">Normaller hesaplanmadan önce köşe noktalarını komşularına doğru çeker.</p>
-            </div>
-
-            <label className="flex cursor-pointer items-center gap-2 text-[11px] text-ink">
-              <button type="button" className="cbox" data-checked={invertTexture} onClick={() => setInvertTexture((v) => !v)} aria-label="Dokuyu ters çevir">
-                <Icon name="check" size={10} />
-              </button>
-              <span onClick={() => setInvertTexture((v) => !v)}>Dokuyu ters çevir</span>
-            </label>
+            <Slider etiket="Kaplama yumuşatma" deger={smoothing} set={setSmoothing} min={0} max={1} step={0.05} />
+            <Slider etiket="Geometri yumuşatma" deger={geoYumusatma} set={setGeoYumusatma} min={0} max={1} step={0.05} />
+            <Cbox secili={invertTexture} tikla={() => setInvertTexture((v) => !v)} etiket="Dokuyu ters çevir" />
           </section>
 
+          {/* DÖNÜŞTÜR */}
           <section className="card mb-2">
             <div className="mb-2 flex items-center justify-between">
               <h2 className="card-title">Dönüştür</h2>
               <Icon name="rotate" size={14} className="text-faint" />
             </div>
-
-            <p className="field-hint mb-2">Daha küçük ya da büyük boyutlar için kutucuğa değer girin.</p>
-
             <div className="mb-2">
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="field-label">U Boyutu</span>
-                <span className="field-value">{sizeU.toFixed(2)} mm</span>
-              </div>
+              <div className="mb-1.5 flex items-center justify-between"><span className="field-label">U Boyutu</span><span className="field-value">{sizeU.toFixed(2)} mm</span></div>
               <div className="flex items-center gap-1.5">
-                <input
-                  type="range"
-                  min={0.1}
-                  max={50}
-                  step={0.01}
-                  value={sizeU}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    setSizeU(v);
-                    if (uvLock) setSizeV(v);
-                  }}
-                />
-                <input
-                  type="number"
-                  min={0.1}
-                  max={50}
-                  step={0.01}
-                  value={sizeU}
-                  onChange={(e) => {
-                    const v = Math.max(0.1, Math.min(50, parseFloat(e.target.value) || 0.1));
-                    setSizeU(v);
-                    if (uvLock) setSizeV(v);
-                  }}
-                  className="w-14"
-                />
+                <input type="range" min={0.1} max={50} step={0.01} value={sizeU} onPointerDown={kaydet} onChange={(e) => { const v = parseFloat(e.target.value); setSizeU(v); if (uvLock) setSizeV(v); }} />
+                <input type="number" min={0.1} max={50} step={0.01} value={sizeU} onChange={(e) => { const v = Math.max(0.1, Math.min(50, parseFloat(e.target.value) || 0.1)); setSizeU(v); if (uvLock) setSizeV(v); }} className="w-14" />
               </div>
             </div>
-
             <div className="mb-2 flex justify-center">
-              <button
-                type="button"
-                onClick={() => setUvLock((v) => !v)}
-                className="btn btn-icon"
-                data-active={uvLock}
-                aria-label="U ve V kilidi"
-                title="U ve V değerlerini eşitle"
-              >
-                <Icon name={uvLock ? "lock" : "unlock"} size={12} />
-              </button>
+              <button type="button" onClick={() => setUvLock((v) => !v)} className="btn btn-icon" data-active={uvLock} title="U ve V değerlerini eşitle" aria-label="U ve V kilidi"><Icon name={uvLock ? "lock" : "unlock"} size={12} /></button>
             </div>
-
             <div className="mb-2">
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="field-label">V Boyutu</span>
-                <span className="field-value">{sizeV.toFixed(2)} mm</span>
-              </div>
+              <div className="mb-1.5 flex items-center justify-between"><span className="field-label">V Boyutu</span><span className="field-value">{sizeV.toFixed(2)} mm</span></div>
               <div className="flex items-center gap-1.5">
-                <input
-                  type="range"
-                  min={0.1}
-                  max={50}
-                  step={0.01}
-                  value={sizeV}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    setSizeV(v);
-                    if (uvLock) setSizeU(v);
-                  }}
-                />
-                <input
-                  type="number"
-                  min={0.1}
-                  max={50}
-                  step={0.01}
-                  value={sizeV}
-                  onChange={(e) => {
-                    const v = Math.max(0.1, Math.min(50, parseFloat(e.target.value) || 0.1));
-                    setSizeV(v);
-                    if (uvLock) setSizeU(v);
-                  }}
-                  className="w-14"
-                />
+                <input type="range" min={0.1} max={50} step={0.01} value={sizeV} onPointerDown={kaydet} onChange={(e) => { const v = parseFloat(e.target.value); setSizeV(v); if (uvLock) setSizeU(v); }} />
+                <input type="number" min={0.1} max={50} step={0.01} value={sizeV} onChange={(e) => { const v = Math.max(0.1, Math.min(50, parseFloat(e.target.value) || 0.1)); setSizeV(v); if (uvLock) setSizeU(v); }} className="w-14" />
               </div>
             </div>
-
             <div className="mb-2 grid grid-cols-2 gap-2">
               <div>
-                <div className="mb-1.5 flex items-center justify-between">
-                  <span className="field-label">U Offseti</span>
-                  <span className="field-value">{offsetU.toFixed(1)} mm</span>
-                </div>
-                <input type="range" min={-50} max={50} step={0.5} value={offsetU} onChange={(e) => setOffsetU(parseFloat(e.target.value))} />
+                <div className="mb-1.5 flex items-center justify-between"><span className="field-label">U Offseti</span><span className="field-value">{offsetU.toFixed(1)}</span></div>
+                <input type="range" min={-50} max={50} step={0.5} value={offsetU} onPointerDown={kaydet} onChange={(e) => setOffsetU(parseFloat(e.target.value))} />
               </div>
               <div>
-                <div className="mb-1.5 flex items-center justify-between">
-                  <span className="field-label">V Offseti</span>
-                  <span className="field-value">{offsetV.toFixed(1)} mm</span>
-                </div>
-                <input type="range" min={-50} max={50} step={0.5} value={offsetV} onChange={(e) => setOffsetV(parseFloat(e.target.value))} />
+                <div className="mb-1.5 flex items-center justify-between"><span className="field-label">V Offseti</span><span className="field-value">{offsetV.toFixed(1)}</span></div>
+                <input type="range" min={-50} max={50} step={0.5} value={offsetV} onPointerDown={kaydet} onChange={(e) => setOffsetV(parseFloat(e.target.value))} />
               </div>
             </div>
-
-            <div className="mb-2">
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="field-label">Rotasyon Açısı</span>
-                <span className="field-value">{rotation} °</span>
-              </div>
-              <input type="range" min={0} max={360} step={1} value={rotation} onChange={(e) => setRotation(parseFloat(e.target.value))} />
-            </div>
-
-            <label className="flex cursor-pointer items-center gap-2 text-[11px] text-ink">
-              <button type="button" className="cbox" data-checked={rotateSides} onClick={() => setRotateSides((v) => !v)} aria-label="Yan yüzleri döndür">
-                <Icon name="check" size={10} />
-              </button>
-              <span onClick={() => setRotateSides((v) => !v)}>Yan yüzleri Z etrafında döndür</span>
-            </label>
+            <Slider etiket="Rotasyon açısı" deger={rotation} set={setRotation} min={0} max={360} step={1} birim="°" hassas={0} />
+            <Cbox secili={rotateSides} tikla={() => setRotateSides((v) => !v)} etiket="Yan yüzleri Z etrafında döndür" />
           </section>
 
+          {/* MASKELEME */}
           <section className="card mb-2">
             <div className="mb-2 flex items-center justify-between">
               <h2 className="card-title">Maskeleme</h2>
               <Icon name="mask" size={14} className="text-faint" />
             </div>
-
-            <div className="mb-2">
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="field-label">Alt yüzeyler</span>
-                <span className="field-value">{maskBottom} °</span>
-              </div>
-              <input type="range" min={0} max={90} step={1} value={maskBottom} onChange={(e) => setMaskBottom(parseFloat(e.target.value))} />
-            </div>
-
-            <div className="mb-2">
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="field-label">Üst yüzeyler</span>
-                <span className="field-value">{maskTop} °</span>
-              </div>
-              <input type="range" min={0} max={90} step={1} value={maskTop} onChange={(e) => setMaskTop(parseFloat(e.target.value))} />
-            </div>
-
+            <Slider etiket="Alt yüzeyler" deger={maskBottom} set={setMaskBottom} min={0} max={90} step={1} birim="°" hassas={0} />
+            <Slider etiket="Üst yüzeyler" deger={maskTop} set={setMaskTop} min={0} max={90} step={1} birim="°" hassas={0} />
             <div className="mb-2">
               <div className="field-hint mb-1">Yüzeye göre ayarla</div>
               <div className="seg w-full">
-                <button type="button" onClick={() => setMaskMode("haric")} data-active={maskMode === "haric"} className="flex-1 justify-center">
-                  Hariç Tut
-                </button>
-                <button type="button" onClick={() => setMaskMode("dahil")} data-active={maskMode === "dahil"} className="flex-1 justify-center">
-                  Sadece Dahil Et
-                </button>
+                <button type="button" onClick={() => { kaydet(); setMaskMode("haric"); }} data-active={maskMode === "haric"} className="flex-1 justify-center">Hariç Tut</button>
+                <button type="button" onClick={() => { kaydet(); setMaskMode("dahil"); }} data-active={maskMode === "dahil"} className="flex-1 justify-center">Sadece Dahil Et</button>
               </div>
             </div>
-
-            <div className="mb-2">
-              <div className="mb-1.5 flex gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => setMaskTool(maskTool === "firca" ? null : "firca")}
-                  className="btn flex-1"
-                  data-active={maskTool === "firca"}
-                >
-                  <Icon name="brush" size={12} />
-                  Fırça
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMaskTool(maskTool === "doldur" ? null : "doldur");
-                    if (maskTool !== "doldur") doldur();
-                  }}
-                  className="btn flex-1"
-                  data-active={maskTool === "doldur"}
-                >
-                  <Icon name="bucket" size={12} />
-                  Doldur
-                </button>
-              </div>
-
-              <div className="mb-1.5">
-                <div className="mb-1.5 flex items-center justify-between">
-                  <span className="field-label">Fırça boyutu</span>
-                  <span className="field-value">{brushSize} px</span>
-                </div>
-                <input type="range" min={1} max={50} step={1} value={brushSize} onChange={(e) => setBrushSize(parseFloat(e.target.value))} />
-              </div>
-
-              <p className="field-hint mb-1.5">Silmek için Shift tuşuna basılı tutun.</p>
-              <div className="mono mb-1.5 text-[10px] text-dim">{maskedCount} poligon maskelendi</div>
-
-              <button type="button" className="btn w-full" onClick={maskeyiTemizle}>
-                <Icon name="eraser" size={12} />
-                Seçimin tümünü temizle
-              </button>
+            <div className="mb-1.5 flex gap-1.5">
+              <button type="button" className="btn flex-1" data-active={maskeArac} onClick={() => { setMaskeArac((v) => !v); setArac(null); }}><Icon name="brush" size={12} />Maske fırçası</button>
+              <button type="button" className="btn flex-1" onClick={maskeDoldur}><Icon name="plus" size={12} />Tümünü boya</button>
             </div>
-
-            <div className="mb-2">
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="field-label">Maskeyi Yumuşat / Mesafe</span>
-                <span className="field-value">{maskSmooth.toFixed(1)}</span>
-              </div>
-              <input type="range" min={0} max={10} step={0.1} value={maskSmooth} onChange={(e) => setMaskSmooth(parseFloat(e.target.value))} />
-            </div>
-
+            <div className="mono mb-1.5 text-[10px] text-dim tnum">{maskeliVertex.toLocaleString("tr-TR")} vertex maskeli</div>
+            <button type="button" className="btn mb-2 w-full" onClick={maskeTemizle}><Icon name="eraser" size={12} />Maskeyi temizle</button>
             <div>
-              <div className="field-hint mb-1">Geçiş</div>
+              <div className="field-hint mb-1">Geçiş eğrisi</div>
               <div className="seg w-full">
-                <button type="button" onClick={() => setEasing("dogrusal")} data-active={easing === "dogrusal"} className="flex-1 justify-center">
-                  Doğrusal
-                </button>
-                <button type="button" onClick={() => setEasing("s")} data-active={easing === "s"} className="flex-1 justify-center">
-                  S Eğrisi
-                </button>
-                <button type="button" onClick={() => setEasing("yumusak")} data-active={easing === "yumusak"} className="flex-1 justify-center">
-                  Yumuşak
-                </button>
+                <button type="button" onClick={() => { kaydet(); setEasing("dogrusal"); }} data-active={easing === "dogrusal"} className="flex-1 justify-center">Doğrusal</button>
+                <button type="button" onClick={() => { kaydet(); setEasing("s"); }} data-active={easing === "s"} className="flex-1 justify-center">S Eğrisi</button>
+                <button type="button" onClick={() => { kaydet(); setEasing("yumusak"); }} data-active={easing === "yumusak"} className="flex-1 justify-center">Yumuşak</button>
               </div>
             </div>
           </section>
 
+          {/* DIŞA AKTAR */}
           <section className="card mb-2">
             <div className="mb-2 flex items-center justify-between">
               <h2 className="card-title">Dışa Aktar</h2>
               <Icon name="download" size={14} className="text-faint" />
             </div>
-
-            <div className="mb-2">
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="field-label">Çözünürlük</span>
-                <span className="field-value">{exportRes.toFixed(2)} mm</span>
-              </div>
-              <input type="range" min={0.05} max={2} step={0.05} value={exportRes} onChange={(e) => setExportRes(parseFloat(e.target.value))} />
-              <div className="mono mt-0.5 flex justify-between text-[9px] text-faint">
-                <span>Kaba</span>
-                <span>İnce</span>
-              </div>
-            </div>
-
+            <Slider etiket="Çözünürlük" deger={exportRes} set={setExportRes} min={0.05} max={2} step={0.05} birim="mm" />
             <div className="mono mb-1 flex items-center justify-between text-[10px]">
-              <span className="text-dim">Çıktının poligon sayısı</span>
-              <span className="tnum text-ink">
-                {tahminiUcgen >= 1000000
-                  ? `${(tahminiUcgen / 1000000).toFixed(2)} M`
-                  : `${Math.round(tahminiUcgen / 1000)} k`}
-              </span>
+              <span className="text-dim">Tahmini poligon</span>
+              <span className="tnum text-ink">{tahminiUcgen >= 1e6 ? `${(tahminiUcgen / 1e6).toFixed(2)} M` : `${Math.round(tahminiUcgen / 1000)} k`}</span>
             </div>
-
-            <div className="mono mb-2 flex items-center justify-between text-[10px]">
-              <span className="text-dim">Sahnedeki poligon sayısı</span>
+            <div className="mono mb-1 flex items-center justify-between text-[10px]">
+              <span className="text-dim">Sahnedeki poligon</span>
               <span className="tnum text-faint">{Math.round(ucgenSayisi / 1000)} k</span>
             </div>
-
+            <div className="mono mb-2 flex items-center justify-between text-[10px]">
+              <span className="text-dim">Katı hacmi</span>
+              <span className="tnum text-faint">{hacimCm3.toFixed(2)} cm³</span>
+            </div>
             <div className="mb-2 grid grid-cols-2 gap-1.5">
-              <button type="button" className="btn btn-accent" onClick={stlIndir} disabled={exportStatus === "working"}>
-                <Icon name="download" size={12} />
-                STL
-              </button>
-              <button type="button" className="btn btn-accent" onClick={handle3MFExport} disabled={exportStatus === "working"}>
-                <Icon name="download" size={12} />
-                3MF
-              </button>
+              <button type="button" className="btn btn-accent" onClick={stlIndir} disabled={exportStatus === "working"}><Icon name="download" size={12} />STL</button>
+              <button type="button" className="btn btn-accent" onClick={mfIndir} disabled={exportStatus === "working"}><Icon name="download" size={12} />3MF</button>
             </div>
-
-            <div className="mono text-[10px] text-dim">
-              {exportStatus === "idle" && "Hazır"}
+            <div className="mono text-[10px]" style={{ color: exportStatus === "error" ? "#f87171" : exportStatus === "done" ? "#34d399" : "#6e7787" }}>
+              {exportStatus === "idle" && (exportNot || "Hazır")}
               {exportStatus === "working" && "Hesaplanıyor..."}
-              {exportStatus === "done" && "İndirildi"}
-              {exportStatus === "error" && "Hata: tekrar deneyin"}
+              {exportStatus === "done" && (exportNot || "İndirildi")}
+              {exportStatus === "error" && (exportNot || "Hata: tekrar deneyin")}
             </div>
-
-            <p className="field-hint mt-1.5">
-              İndirilen dosya, ekranda gördüğünüz kabartmanın birebir aynısıdır. 3MF milimetre birimiyle yazılır.
-            </p>
+            <p className="field-hint mt-1.5">Çözünürlük, dışa aktarımda gerçek yeniden örnekleme yapar. İndirilen dosya ekrandaki kabartmanın birebir aynısıdır.</p>
           </section>
 
           <footer className="px-1 pb-2 pt-1 text-center text-[10px] leading-relaxed text-dim">
             Palamut3D · Açık kaynak · Tamamen ücretsiz · Tüm işlemler tarayıcınızda · Powered by{" "}
-            <a href="https://mucahidbalci.github.io" target="_blank" rel="noopener noreferrer" className="link">
-              Mucahid Balci
-            </a>
+            <a href="https://mucahidbalci.github.io" target="_blank" rel="noopener noreferrer" className="link">Mucahid Balci</a>
           </footer>
         </aside>
       </div>
 
-      <footer className="mono flex h-status shrink-0 items-center gap-2 border-t border-line bg-panel px-4 text-[10px] text-dim">
+      <footer className="mono flex h-status shrink-0 items-center gap-2 overflow-x-auto border-t border-line bg-panel px-4 text-[10px] text-dim">
         <Icon name="file" size={12} className="text-faint" />
-        <span className="text-ink">{gosterilenAd}</span>
+        <span className="whitespace-nowrap text-ink">{fileName || "kup.stl"}</span>
         <span className="sep">|</span>
-        <span className="tnum">{ucgenSayisi.toLocaleString("tr-TR")} üçgen</span>
+        <span className="tnum whitespace-nowrap">{ucgenSayisi.toLocaleString("tr-TR")} üçgen</span>
         <span className="sep">|</span>
-        <span className="tnum">
-          {sizeMm.x.toFixed(1)} × {sizeMm.y.toFixed(1)} × {sizeMm.z.toFixed(1)} mm
-        </span>
+        <span className="tnum whitespace-nowrap">{sizeMm.x.toFixed(1)} × {sizeMm.y.toFixed(1)} × {sizeMm.z.toFixed(1)} mm</span>
         <span className="sep">|</span>
-        <span className="tnum">{vertexSayisi.toLocaleString("tr-TR")} vertex</span>
+        <span className="tnum whitespace-nowrap">{vertexSayisi.toLocaleString("tr-TR")} vertex</span>
         <span className="sep">|</span>
-        <span className="tnum">{layers.filter((l) => l.visible).length} etkin katman</span>
-        {!preview3D ? (
-          <>
-            <span className="sep">|</span>
-            <span className="text-faint">önizleme kapalı</span>
-          </>
-        ) : null}
-
-        <span className="ml-auto flex items-center gap-1.5">
-          <FpsMeter />
-          <Icon name="gauge" size={12} className="text-faint" />
-        </span>
+        <span className="tnum whitespace-nowrap">{layers.filter((l) => l.visible).length} katman</span>
+        <span className="sep">|</span>
+        <span className="tnum whitespace-nowrap">{bolgeler.filter((b) => b.gorunur).length} bölge</span>
+        <span className="ml-auto flex shrink-0 items-center gap-1.5 pl-3"><FpsMeter /><Icon name="gauge" size={12} className="text-faint" /></span>
       </footer>
     </div>
   );
