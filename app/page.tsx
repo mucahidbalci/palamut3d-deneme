@@ -13,6 +13,7 @@ import * as THREE from "three";
 import { STLExporter } from "three/examples/jsm/exporters/STLExporter.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 import JSZip from "jszip";
+import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 /* ------------------------------------------------------------
    ÖLÇEK SABİTLERİ
@@ -21,7 +22,7 @@ import JSZip from "jszip";
 const MM_PER_UNIT = 10;
 const UNIT_PER_MM = 1 / MM_PER_UNIT;
 const CUBE_SIZE = 5;
-const CUBE_SEG = 192;
+const CUBE_SEG = 128;
 const TEX_SIZE = 512;
 const MASK_SIZE = 512;
 const MAX_LAYERS = 8;
@@ -562,9 +563,29 @@ function ensureUV(geo: THREE.BufferGeometry): THREE.BufferGeometry {
   return geo;
 }
 
+/* Kaynaklama: sert normaller ve UV birleşmeyi engeller.
+   Bu yüzden ikisi de ÖNCE silinir, sonra mergeVertices, en son yumuşak normaller üretilir.
+   Sıra bozulursa kaynaklama hiç çalışmaz ve yırtık devam eder. */
+function kaynakla(geo: THREE.BufferGeometry): THREE.BufferGeometry {
+  geo.deleteAttribute("normal");
+  geo.deleteAttribute("uv");
+  const welded = mergeVertices(geo, 1e-4);
+  welded.computeVertexNormals();
+  return welded;
+}
+
+/* Varsayılan küp: kaynaklı ve UV'li.
+   BoxGeometry her yüzü ayrı vertex'lerle kurar; kaynaklamazsak küpün kenarları ayrışır. */
+function kupGeometrisi(): THREE.BufferGeometry {
+  const geo = kaynakla(
+    new THREE.BoxGeometry(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE, CUBE_SEG, CUBE_SEG, CUBE_SEG)
+  );
+  ensureUV(geo);
+  return geo;
+}
+
 /* STL normalizasyonu */
 function normalizeGeometry(geo: THREE.BufferGeometry): THREE.BufferGeometry {
-  geo.computeVertexNormals();
   geo.center();
   geo.computeBoundingBox();
   const boyut = new THREE.Vector3();
@@ -573,8 +594,15 @@ function normalizeGeometry(geo: THREE.BufferGeometry): THREE.BufferGeometry {
   const k = CUBE_SIZE / maxB;
   geo.scale(k, k, k);
   geo.computeBoundingBox();
-  ensureUV(geo);
-  return geo;
+
+  /* Kaynakla, sonra UV ata: UV kaynaklamadan önce atanırsa birleşme engellenir. */
+  const welded = kaynakla(geo);
+  geo.dispose();
+  ensureUV(welded);
+
+  /* Kaynaklama sonrası bounding box ve normaller temiz durumda. */
+  welded.computeBoundingBox();
+  return welded;
 }
 
 /* Geçiş eğrileri */
@@ -594,14 +622,12 @@ function pozisyonYumusat(geo: THREE.BufferGeometry, agirlik: number) {
   const toplamY = new Float32Array(n);
   const toplamZ = new Float32Array(n);
   const sayac = new Uint8Array(n);
-
   const ekle = (hedef: number, kaynak: number) => {
     toplamX[hedef] += pos.getX(kaynak);
     toplamY[hedef] += pos.getY(kaynak);
     toplamZ[hedef] += pos.getZ(kaynak);
     if (sayac[hedef] < 255) sayac[hedef] += 1;
   };
-
   for (let t = 0; t < idx.count; t += 3) {
     const a = idx.getX(t);
     const b = idx.getX(t + 1);
@@ -613,7 +639,6 @@ function pozisyonYumusat(geo: THREE.BufferGeometry, agirlik: number) {
     ekle(c, a);
     ekle(c, b);
   }
-
   for (let i = 0; i < n; i++) {
     const s = sayac[i];
     if (s === 0) continue;
@@ -637,7 +662,6 @@ function pozisyonYumusat(geo: THREE.BufferGeometry, agirlik: number) {
 function blurImageData(data: Uint8ClampedArray, s: number, yaricap: number) {
   if (yaricap < 1) return;
   const gecici = new Uint8ClampedArray(data.length);
-  // yatay
   for (let y = 0; y < s; y++) {
     let toplam = 0;
     let adet = 0;
@@ -661,7 +685,6 @@ function blurImageData(data: Uint8ClampedArray, s: number, yaricap: number) {
       }
     }
   }
-  // dikey
   for (let x = 0; x < s; x++) {
     let toplam = 0;
     let adet = 0;
@@ -712,13 +735,13 @@ type TexLayer = {
 };
 
 type DisplOpts = {
-  amplitude: number; // sahne birimi
+  amplitude: number;
   invert: boolean;
   symmetric: boolean;
   projection: string;
   blendSmooth: number;
-  maskBottom: number; // radyan
-  maskTop: number; // radyan
+  maskBottom: number;
+  maskTop: number;
   maskMode: string;
   easing: string;
   smoothing: number;
@@ -740,12 +763,43 @@ function applyRealDisplacement(
   const uv = geo.attributes.uv;
   if (!pos || !nor || !uv || katmanlar.length === 0) return geo;
 
-  /* Doku yumuşatma (katman verisi kopyaları üzerinde) */
-  const yumusatmaYaricap = Math.round(opts.smoothing * 6);
+  /* Ortalama kenar uzunluğu — diken sınırı için bir kez, ilk 3000 üçgen üzerinden. */
+  let ortKenar = 0;
+  if (geo.index) {
+    const idx = geo.index.array;
+    const ucgenOrnek = Math.min(3000, Math.floor(idx.length / 3));
+    let toplamKenar = 0;
+    let kenarAdet = 0;
+    for (let t = 0; t < ucgenOrnek; t++) {
+      const a = idx[t * 3];
+      const b = idx[t * 3 + 1];
+      const c = idx[t * 3 + 2];
+      const ax0 = pos.getX(a);
+      const ay0 = pos.getY(a);
+      const az0 = pos.getZ(a);
+      const bx0 = pos.getX(b);
+      const by0 = pos.getY(b);
+      const bz0 = pos.getZ(b);
+      const cx0 = pos.getX(c);
+      const cy0 = pos.getY(c);
+      const cz0 = pos.getZ(c);
+      toplamKenar += Math.sqrt((bx0 - ax0) ** 2 + (by0 - ay0) ** 2 + (bz0 - az0) ** 2);
+      toplamKenar += Math.sqrt((cx0 - bx0) ** 2 + (cy0 - by0) ** 2 + (cz0 - bz0) ** 2);
+      toplamKenar += Math.sqrt((ax0 - cx0) ** 2 + (ay0 - cy0) ** 2 + (az0 - cz0) ** 2);
+      kenarAdet += 3;
+    }
+    ortKenar = kenarAdet > 0 ? toplamKenar / kenarAdet : 0;
+  }
+  const dSinir = ortKenar > 0 ? ortKenar * 6 : Infinity;
+
+  /* Doku frekansı mesh çözünürlüğünden yüksekse aliasing dikeni oluşur.
+     Katman ölçeğine göre otomatik blur uygulanır, kullanıcı değeri alt sınır kabul edilir. */
   const islenecek = katmanlar.map((k) => {
-    if (yumusatmaYaricap < 1) return k;
+    const otomatik = Math.max(opts.smoothing, Math.min(1, k.scaleU / 12));
+    const yaricap = Math.round(otomatik * 6);
+    if (yaricap < 1) return k;
     const kopya = new Uint8ClampedArray(k.data);
-    blurImageData(kopya, TEX_SIZE, yumusatmaYaricap);
+    blurImageData(kopya, TEX_SIZE, yaricap);
     return { ...k, data: kopya };
   });
 
@@ -775,16 +829,14 @@ function applyRealDisplacement(
     /* --- Maske --- */
     let maske = 1;
     if (maskeData) {
-      // Açı maskesi
       if (nz < -cosAlt) maske = 0;
       else if (nz > cosUst && opts.maskTop > 0) maske = 0;
 
-      // Fırça maskesi
       const mu = uv.getX(i);
       const mv = uv.getY(i);
       const mi =
-        ((((1 - (mv % 1 + 1) % 1) * (MASK_SIZE - 1)) | 0) * MASK_SIZE +
-          (((mu % 1 + 1) % 1) * (MASK_SIZE - 1))) *
+        ((((1 - ((mv % 1) + 1) % 1) * (MASK_SIZE - 1)) | 0) * MASK_SIZE +
+          ((((mu % 1) + 1) % 1) * (MASK_SIZE - 1))) *
         4;
       const firca = maskeData[mi] / 255;
       if (opts.maskMode === "dahil") maske *= firca;
@@ -838,6 +890,9 @@ function applyRealDisplacement(
         const p3 = ornek(kat.data, ...[uvDonus(sx, sz)][0]);
         parlak = (p1 * wx + p2 * wy + p3 * wz) / wt;
       } else if (opts.projection === "kutu") {
+        const ax = Math.abs(nx);
+        const ay = Math.abs(ny);
+        const az = Math.abs(nz);
         if (ax >= ay && ax >= az) {
           parlak = ornek(kat.data, ...[uvDonus(pz * 0.2 + 0.5, py * 0.2 + 0.5)][0]);
         } else if (ay >= az) {
@@ -874,7 +929,10 @@ function applyRealDisplacement(
     if (toplam <= 0.0001) continue;
     if (toplam > 1) toplam = 1;
 
-    const d = toplam * amp * yon * maske;
+    let d = toplam * amp * yon * maske;
+    if (d > dSinir) d = dSinir;
+    else if (d < -dSinir) d = -dSinir;
+
     pos.setXYZ(i, px + nx * d, py + ny * d, pz + nz * d);
   }
 
@@ -1057,9 +1115,7 @@ function Model({
     let iptal = false;
     const zaman = setTimeout(() => {
       if (iptal) return;
-
       let g: THREE.BufferGeometry;
-
       if (!preview3D) {
         g = baseGeometry.clone();
       } else {
@@ -1076,7 +1132,6 @@ function Model({
         }));
         g = applyRealDisplacement(baseGeometry, texLayers, opts, maskCanvas);
       }
-
       setDisplaced(g);
       geoRef.current = g;
       g.computeBoundingBox();
@@ -1167,7 +1222,8 @@ function ucgenXmlKur(geo: THREE.BufferGeometry): string {
     vertexXml.join("\n") +
     `\n</vertices>\n<triangles>\n` +
     ucgenler.join("\n") +
-    `\n</triangles>\n</mesh>\n</object>\n</resources>\n<build><item objectid="1"/></build>\n</model>`
+    `\n</triangles>\n</mesh>\n</object>\n</resources>\n` +
+    `<build><item objectid="1"/></build>\n</model>`
   );
 }
 
@@ -1267,9 +1323,7 @@ export default function Page() {
   const [exportStatus, setExportStatus] = useState<"idle" | "working" | "done" | "error">("idle");
 
   /* Geometri + maske */
-  const [baseGeometry, setBaseGeometry] = useState<THREE.BufferGeometry>(
-    () => new THREE.BoxGeometry(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE, CUBE_SEG, CUBE_SEG, CUBE_SEG)
-  );
+  const [baseGeometry, setBaseGeometry] = useState<THREE.BufferGeometry>(() => kupGeometrisi());
   const geoRef = useRef<THREE.BufferGeometry | null>(null);
   const maskRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -1334,9 +1388,7 @@ export default function Page() {
   /* Preset adı çözücü (özel haritalar dahil) */
   const presetAdi = useCallback(
     (id: string) =>
-      PRESET_MAP[id]?.name ||
-      ozelHaritalar.find((o) => o.id === id)?.name ||
-      "Katman",
+      PRESET_MAP[id]?.name || ozelHaritalar.find((o) => o.id === id)?.name || "Katman",
     [ozelHaritalar]
   );
 
@@ -1395,22 +1447,18 @@ export default function Page() {
     setLayers((ls) =>
       ls.map((l) =>
         l.id === aktifKatman.id
-          ? {
-              ...l,
-              scaleU: su,
-              scaleV: sv,
-              offsetU: offsetU / 50,
-              offsetV: offsetV / 50,
-              rotation,
-            }
+          ? { ...l, scaleU: su, scaleV: sv, offsetU: offsetU / 50, offsetV: offsetV / 50, rotation }
           : l
       )
     );
   }, [sizeU, sizeV, offsetU, offsetV, rotation, activeLayer]);
 
-  const presetSec = useCallback((presetId: string) => {
-    setLayers((ls) => ls.map((l) => (l.id === activeLayer ? { ...l, presetId } : l)));
-  }, [activeLayer]);
+  const presetSec = useCallback(
+    (presetId: string) => {
+      setLayers((ls) => ls.map((l) => (l.id === activeLayer ? { ...l, presetId } : l)));
+    },
+    [activeLayer]
+  );
 
   /* Katman yönetimi */
   const katmanEkle = useCallback(() => {
@@ -1563,16 +1611,12 @@ export default function Page() {
       setTimeout(() => setExportStatus("idle"), 2500);
       return;
     }
-
     setExportStatus("working");
     const okuyucu = new FileReader();
-
     okuyucu.onload = () => {
       try {
         const tampon = okuyucu.result as ArrayBuffer;
-        const ham = new STLLoader().parse(tampon);
-        const geo = normalizeGeometry(ham);
-        geo.computeBoundingBox();
+        const geo = normalizeGeometry(new STLLoader().parse(tampon));
         setBaseGeometry(geo);
         setFileName(file.name);
         setFileSizeKB(Math.max(1, Math.round(file.size / 1024)));
@@ -1583,18 +1627,15 @@ export default function Page() {
         setTimeout(() => setExportStatus("idle"), 2500);
       }
     };
-
     okuyucu.onerror = () => {
       setExportStatus("error");
       setTimeout(() => setExportStatus("idle"), 2500);
     };
-
     okuyucu.readAsArrayBuffer(file);
   }, []);
 
   const kubeDon = useCallback(() => {
-    const geo = new THREE.BoxGeometry(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE, CUBE_SEG, CUBE_SEG, CUBE_SEG);
-    setBaseGeometry(geo);
+    setBaseGeometry(kupGeometrisi());
     setMode("kup");
     setFileName("");
     setFileSizeKB(0);
@@ -1711,7 +1752,9 @@ export default function Page() {
   }, []);
 
   const vertexSayisi = baseGeometry.attributes.position.count;
-  const ucgenSayisi = Math.round(vertexSayisi / 3) || 0;
+  const ucgenSayisi = baseGeometry.index
+    ? Math.round(baseGeometry.index.count / 3)
+    : Math.round(baseGeometry.attributes.position.count / 3);
   const gosterilenAd = fileName || "kup.stl";
 
   /* Galeri listesi (presetler + özel haritalar, arama ve kategori filtreli) */
@@ -1754,7 +1797,7 @@ export default function Page() {
 
         <div className="flex items-center gap-2">
           <div className="seg">
-            <button type="button" onClick={() => setMode("kup")} data-active={mode === "kup"}>
+            <button type="button" onClick={kubeDon} data-active={mode === "kup"}>
               <Icon name="cube" size={13} />Küp
             </button>
             <button
@@ -1995,9 +2038,7 @@ export default function Page() {
             <div className="mb-2 flex items-center justify-between">
               <h2 className="card-title">Kabartma Katmanları</h2>
               <div className="flex items-center gap-1">
-                <span className="mono text-[10px] text-faint">
-                  {layers.length}/{MAX_LAYERS}
-                </span>
+                <span className="mono text-[10px] text-faint">{layers.length}/{MAX_LAYERS}</span>
                 <button
                   type="button"
                   className="btn btn-icon"
@@ -2053,10 +2094,7 @@ export default function Page() {
                       title="Yukarı taşı"
                       aria-label="Yukarı taşı"
                       disabled={i === 0}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        katmanTasi(l.id, -1);
-                      }}
+                      onClick={(e) => { e.stopPropagation(); katmanTasi(l.id, -1); }}
                     >
                       <Icon name="chevron-up" size={11} />
                     </button>
@@ -2066,10 +2104,7 @@ export default function Page() {
                       title="Aşağı taşı"
                       aria-label="Aşağı taşı"
                       disabled={i === layers.length - 1}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        katmanTasi(l.id, 1);
-                      }}
+                      onClick={(e) => { e.stopPropagation(); katmanTasi(l.id, 1); }}
                     >
                       <Icon name="chevron-down" size={11} />
                     </button>
@@ -2079,10 +2114,7 @@ export default function Page() {
                       data-active={l.visible}
                       title={l.visible ? "Katmanı gizle" : "Katmanı göster"}
                       aria-label={l.visible ? "Katmanı gizle" : "Katmanı göster"}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        katmanGorunurluk(l.id);
-                      }}
+                      onClick={(e) => { e.stopPropagation(); katmanGorunurluk(l.id); }}
                     >
                       <Icon name={l.visible ? "eye" : "eye-off"} size={11} />
                     </button>
@@ -2092,10 +2124,7 @@ export default function Page() {
                       title="Katmanı çoğalt"
                       aria-label="Katmanı çoğalt"
                       disabled={layers.length >= MAX_LAYERS}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        katmanKopyala(l.id);
-                      }}
+                      onClick={(e) => { e.stopPropagation(); katmanKopyala(l.id); }}
                     >
                       <Icon name="copy" size={11} />
                     </button>
@@ -2105,10 +2134,7 @@ export default function Page() {
                       title="Katmanı sil"
                       aria-label="Katmanı sil"
                       disabled={layers.length === 1}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        katmanSil(l.id);
-                      }}
+                      onClick={(e) => { e.stopPropagation(); katmanSil(l.id); }}
                     >
                       <Icon name="trash" size={11} />
                     </button>
@@ -2119,17 +2145,13 @@ export default function Page() {
                       <select
                         value={l.blend}
                         onChange={(e) =>
-                          setLayers((ls) =>
-                            ls.map((x) => (x.id === l.id ? { ...x, blend: e.target.value } : x))
-                          )
+                          setLayers((ls) => ls.map((x) => (x.id === l.id ? { ...x, blend: e.target.value } : x)))
                         }
                         onClick={(e) => e.stopPropagation()}
                         className="appearance-none rounded-btn border border-line bg-card py-0.5 pl-1 pr-4 text-[10px] text-dim"
                       >
                         {BLEND_MODES.map((b) => (
-                          <option key={b.id} value={b.id}>
-                            {b.label}
-                          </option>
+                          <option key={b.id} value={b.id}>{b.label}</option>
                         ))}
                       </select>
                       <Icon name="chevron-down" size={9} className="pointer-events-none absolute right-0.5 top-1/2 -translate-y-1/2 text-faint" />
@@ -2153,18 +2175,12 @@ export default function Page() {
               ))}
             </div>
 
-            <button
-              type="button"
-              className="btn w-full"
-              onClick={katmanEkle}
-              disabled={layers.length >= MAX_LAYERS}
-            >
+            <button type="button" className="btn w-full" onClick={katmanEkle} disabled={layers.length >= MAX_LAYERS}>
               <Icon name="plus" size={12} />
               Katman ekle
             </button>
             <p className="field-hint mt-1.5">
-              Katmanlar yukarıdan aşağıya doğru üst üste bindirilir. Blend modu ve derinlik her katman için ayrı
-              çalışır.
+              Katmanlar yukarıdan aşağıya doğru üst üste bindirilir. Blend modu ve derinlik her katman için ayrı çalışır.
             </p>
           </section>
 
@@ -2230,10 +2246,7 @@ export default function Page() {
                     <span
                       role="button"
                       tabIndex={-1}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        ozelHaritaSil(p.id);
-                      }}
+                      onClick={(e) => { e.stopPropagation(); ozelHaritaSil(p.id); }}
                       className="absolute right-0.5 top-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-bg/85 text-dim hover:text-ink"
                       title="Özel haritayı sil"
                     >
@@ -2263,20 +2276,14 @@ export default function Page() {
                 if (f) void ozelHaritaYukle(f);
               }}
             />
-            <button
-              type="button"
-              className="btn mt-2 w-full"
-              onClick={() => ozelInputRef.current?.click()}
-            >
+            <button type="button" className="btn mt-2 w-full" onClick={() => ozelInputRef.current?.click()}>
               <Icon name="image" size={12} />
               Özelleştirilmiş bir harita yükle
             </button>
             <p className="field-hint mt-1.5">
               PNG / JPG / WEBP. Görsel 512 × 512&apos;ye kırpılır ve gri tonlamalı yükseklik olarak okunur.
             </p>
-            {yuklemeDurum ? (
-              <div className="mono mt-1 text-[10px] text-accent">{yuklemeDurum}</div>
-            ) : null}
+            {yuklemeDurum ? <div className="mono mt-1 text-[10px] text-accent">{yuklemeDurum}</div> : null}
           </section>
 
           <section className="card mb-2">
@@ -2427,7 +2434,14 @@ export default function Page() {
             </div>
 
             <div className="mb-2 flex justify-center">
-              <button type="button" onClick={() => setUvLock((v) => !v)} className="btn btn-icon" data-active={uvLock} aria-label="U ve V kilidi" title="U ve V değerlerini eşitle">
+              <button
+                type="button"
+                onClick={() => setUvLock((v) => !v)}
+                className="btn btn-icon"
+                data-active={uvLock}
+                aria-label="U ve V kilidi"
+                title="U ve V değerlerini eşitle"
+              >
                 <Icon name={uvLock ? "lock" : "unlock"} size={12} />
               </button>
             </div>
@@ -2567,7 +2581,6 @@ export default function Page() {
               </div>
 
               <p className="field-hint mb-1.5">Silmek için Shift tuşuna basılı tutun.</p>
-
               <div className="mono mb-1.5 text-[10px] text-dim">{maskedCount} poligon maskelendi</div>
 
               <button type="button" className="btn w-full" onClick={maskeyiTemizle}>
@@ -2626,6 +2639,7 @@ export default function Page() {
                   : `${Math.round(tahminiUcgen / 1000)} k`}
               </span>
             </div>
+
             <div className="mono mb-2 flex items-center justify-between text-[10px]">
               <span className="text-dim">Sahnedeki poligon sayısı</span>
               <span className="tnum text-faint">{Math.round(ucgenSayisi / 1000)} k</span>
